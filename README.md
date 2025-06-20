@@ -24,7 +24,7 @@ This interpreter implements the V programming language, providing an execution e
 ## Project Structure
 
 ```
-OLC2_PROYECTO1_G15/
+OLC2_PROYECTO2_G15/
 ├── grammar/            # ANTLR4 grammar definitions
 │   └── MyLang.g4       # Grammar file for V language
 ├── parser/             # Generated ANTLR parser (generated code)
@@ -65,8 +65,8 @@ OLC2_PROYECTO1_G15/
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/xvimnt/OLC2_PROYECTO1_G15.git
-cd OLC2_PROYECTO1_G15
+git clone https://github.com/xvimnt/OLC2_PROYECTO2_G15.git
+cd OLC2_PROYECTO2_G15
 ```
 
 2. Generate the parser and build the interpreter:
@@ -85,19 +85,19 @@ This will:
 #### Run a V language file:
 
 ```bash
-./OLC2_PROYECTO1_G15 run examples/basic.mylang
+./OLC2_PROYECTO2_G15 run examples/basic.mylang
 ```
 
 #### Start the REPL (interactive mode):
 
 ```bash
-./OLC2_PROYECTO1_G15 repl
+./OLC2_PROYECTO2_G15 repl
 ```
 
 #### Parse a file and display the AST:
 
 ```bash
-./OLC2_PROYECTO1_G15 parse examples/basic.mylang
+./OLC2_PROYECTO2_G15 parse examples/basic.mylang
 ```
 
 ## Development

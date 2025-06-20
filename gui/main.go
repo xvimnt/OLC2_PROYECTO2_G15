@@ -349,7 +349,7 @@ func main() {
 		tmpFile.WriteString(editor.Text)
 		tmpFile.Close()
 
-		cmd := exec.Command("../OLC2_PROYECTO1_G15", "run", tmpFile.Name())
+		cmd := exec.Command("../OLC2_PROYECTO2_G15", "run", tmpFile.Name())
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			consola.SetText("Error al ejecutar:\n" + string(output))
@@ -367,7 +367,7 @@ func main() {
 		tmpFile.WriteString(editor.Text)
 		tmpFile.Close()
 
-		cmd := exec.Command("../OLC2_PROYECTO1_G15", "run", tmpFile.Name())
+		cmd := exec.Command("../OLC2_PROYECTO2_G15", "run", tmpFile.Name())
 		cmd.Env = append(os.Environ(), "VLANG_ERRORS=1")
 		output, _ := cmd.CombinedOutput()
 
@@ -391,7 +391,7 @@ func main() {
 		tmpFile.WriteString(editor.Text)
 		tmpFile.Close()
 
-		cmd := exec.Command("../OLC2_PROYECTO1_G15", "run", tmpFile.Name())
+		cmd := exec.Command("../OLC2_PROYECTO2_G15", "run", tmpFile.Name())
 		cmd.Env = append(os.Environ(), "VLANG_SYMBOLS=1")
 		output, err := cmd.CombinedOutput()
 		if err != nil {

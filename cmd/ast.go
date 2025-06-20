@@ -6,8 +6,8 @@ import (
 	"strconv"
 
 	antlr "github.com/antlr/antlr4/runtime/Go/antlr/v4"
-	"github.com/xvimnt/OLC2_PROYECTO1_G15/ast"
-	"github.com/xvimnt/OLC2_PROYECTO1_G15/parser"
+	"github.com/xvimnt/OLC2_PROYECTO2_G15/ast"
+	"github.com/xvimnt/OLC2_PROYECTO2_G15/parser"
 )
 
 // getNodeString is a helper to get a string representation of an AST node for logging.

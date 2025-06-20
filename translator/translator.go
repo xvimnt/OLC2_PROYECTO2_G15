@@ -3,7 +3,7 @@ package translator
 import (
 	"fmt"
 
-	"github.com/xvimnt/OLC2_PROYECTO1_G15/ast"
+	"github.com/xvimnt/OLC2_PROYECTO2_G15/ast"
 )
 
 // Translator translates AST nodes into assembly code.

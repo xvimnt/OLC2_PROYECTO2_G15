@@ -9,10 +9,10 @@ import (
 	"strings"
 
 	"github.com/antlr/antlr4/runtime/Go/antlr/v4"
-	"github.com/xvimnt/OLC2_PROYECTO1_G15/ast"
-	"github.com/xvimnt/OLC2_PROYECTO1_G15/interpreter"
-	"github.com/xvimnt/OLC2_PROYECTO1_G15/parser"
-	"github.com/xvimnt/OLC2_PROYECTO1_G15/translator"
+	"github.com/xvimnt/OLC2_PROYECTO2_G15/ast"
+	"github.com/xvimnt/OLC2_PROYECTO2_G15/interpreter"
+	"github.com/xvimnt/OLC2_PROYECTO2_G15/parser"
+	"github.com/xvimnt/OLC2_PROYECTO2_G15/translator"
 )
 
 const version = "0.1.0"
@@ -70,11 +70,11 @@ func main() {
 
 func printHelp() {
 	fmt.Println("V Language Interpreter - Usage:")
-	fmt.Println("  OLC2_PROYECTO1_G15 run <file>       Run a V language file")
-	fmt.Println("  OLC2_PROYECTO1_G15 repl             Start an interactive REPL")
-	fmt.Println("  OLC2_PROYECTO1_G15 parse <file>     Parse a file and print the AST")
-	fmt.Println("  OLC2_PROYECTO1_G15 help             Display this help message")
-	fmt.Println("  OLC2_PROYECTO1_G15 version          Display version information")
+	fmt.Println("  OLC2_PROYECTO2_G15 run <file>       Run a V language file")
+	fmt.Println("  OLC2_PROYECTO2_G15 repl             Start an interactive REPL")
+	fmt.Println("  OLC2_PROYECTO2_G15 parse <file>     Parse a file and print the AST")
+	fmt.Println("  OLC2_PROYECTO2_G15 help             Display this help message")
+	fmt.Println("  OLC2_PROYECTO2_G15 version          Display version information")
 }
 
 func runFile(filePath string, debugMode bool) {

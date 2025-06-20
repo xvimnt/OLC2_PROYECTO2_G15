@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/antlr/antlr4/runtime/Go/antlr/v4"
-	"github.com/xvimnt/OLC2_PROYECTO1_G15/parser"
+	"github.com/xvimnt/OLC2_PROYECTO2_G15/parser"
 )
 
 // Lexer wraps ANTLR-generated lexer to provide additional functionality

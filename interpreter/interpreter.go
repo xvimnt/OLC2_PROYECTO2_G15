@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings" // Used for strings.Join in native functions like print, println
 
-	"github.com/xvimnt/OLC2_PROYECTO1_G15/ast"
-	// "github.com/xvimnt/OLC2_PROYECTO1_G15/parser" // Not directly used here, but ast depends on it
+	"github.com/xvimnt/OLC2_PROYECTO2_G15/ast"
+	// "github.com/xvimnt/OLC2_PROYECTO2_G15/parser" // Not directly used here, but ast depends on it
 )
 
 // getTypeName converts a Value to its string type representation.

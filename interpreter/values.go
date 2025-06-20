@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/xvimnt/OLC2_PROYECTO1_G15/ast"
+	"github.com/xvimnt/OLC2_PROYECTO2_G15/ast"
 )
 
 // ValueType represents the type of a value in the V language

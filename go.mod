@@ -1,4 +1,4 @@
-module github.com/xvimnt/OLC2_PROYECTO1_G15
+module github.com/xvimnt/OLC2_PROYECTO2_G15
 
 go 1.22
 

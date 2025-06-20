@@ -1,4 +1,4 @@
-# V Language Interpreter
+# V Language Interpreter + ARM64 Translator
 
 A Go-based interpreter for the V programming language using ANTLR4 with comprehensive test-driven development (TDD).
 
@@ -37,6 +37,8 @@ OLC2_PROYECTO2_G15/
 │   ├── interpreter.go  # Core interpreter logic
 │   ├── environment.go  # Symbol table and scopes
 │   └── values.go       # Runtime values
+├── translator/         # Translator implementation
+│   ├── translator.go   # Core translator logic
 ├── cmd/                # Command-line interface
 │   └── main.go         # CLI entry point
 ├── examples/           # Example V language programs

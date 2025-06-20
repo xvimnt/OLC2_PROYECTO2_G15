@@ -3,16 +3,17 @@ package translator
 import (
 	"fmt"
 	"os" // Added for Fprintf to os.Stderr for errors
+	"strings"
 
 	"github.com/xvimnt/OLC2_PROYECTO2_G15/ast"
 )
 
 // Translator translates AST nodes into assembly code.
 type Translator struct {
-	output         []string // Stores generated .text section assembly lines
-	dataSection    []string // Stores generated .data section assembly lines
-	stringCounter  int      // For generating unique string labels
-	needsPrintf    bool     // Tracks if printf is used (for .extern printf)
+	asm            []string          // Stores generated .text section assembly lines
+	dataSection    []string          // Stores generated .data section assembly lines
+	stringCounter  int               // For generating unique string labels
+	needsPrintf    bool              // Tracks if printf is used (for .extern printf)
 	currentFuncDef *ast.FunctionDecl // Keep track of the current function being defined
 	DebugMode      bool
 }
@@ -20,7 +21,7 @@ type Translator struct {
 // NewTranslator creates a new Translator instance.
 func NewTranslator(debugMode bool) *Translator {
 	return &Translator{
-		output:         make([]string, 0),
+		asm:            make([]string, 0),
 		dataSection:    make([]string, 0),
 		stringCounter:  0,
 		needsPrintf:    false,
@@ -43,31 +44,29 @@ func (t *Translator) addStringData(strContent string) string {
 
 // GetAssembly returns the generated assembly code.
 func (t *Translator) GetAssembly() []string {
-	finalAssembly := make([]string, 0)
-	finalAssembly = append(finalAssembly, ".arch armv8-a") // Specify ARMv8-a architecture
+	var finalAsm []string
 
-	if t.needsPrintf {
-		finalAssembly = append(finalAssembly, ".extern printf")
-	}
-
+	// .data section
 	if len(t.dataSection) > 0 {
-		finalAssembly = append(finalAssembly, "")
-		finalAssembly = append(finalAssembly, ".data")
-		finalAssembly = append(finalAssembly, t.dataSection...)
+		finalAsm = append(finalAsm, ".data")
+		finalAsm = append(finalAsm, t.dataSection...)
+		finalAsm = append(finalAsm, "") // Blank line
 	}
 
-	finalAssembly = append(finalAssembly, "")
-	finalAssembly = append(finalAssembly, ".text")
-	finalAssembly = append(finalAssembly, t.output...)
+	// .text section
+	if len(t.asm) > 0 {
+		finalAsm = append(finalAsm, ".text")
+		finalAsm = append(finalAsm, t.asm...)
+	}
 
-	return finalAssembly
+	return finalAsm
 }
 
 func (t *Translator) addAsm(instr string, args ...interface{}) {
 	if len(args) > 0 {
-		t.output = append(t.output, fmt.Sprintf(instr, args...))
+		t.asm = append(t.asm, fmt.Sprintf(instr, args...))
 	} else {
-		t.output = append(t.output, instr)
+		t.asm = append(t.asm, instr)
 	}
 }
 
@@ -113,9 +112,10 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 	t.currentFuncDef = node
 
 	if node.Name != nil && node.Name.Name == "main" {
-		t.addAsm(".global main")
-	}
-	if node.Name != nil {
+		t.addAsm(".global _start")
+		t.addAsm("_start:")
+	} else if node.Name != nil {
+		t.addAsm(".global %s", node.Name.Name)
 		t.addAsm("%s:", node.Name.Name)
 	} else {
 		// Handle anonymous functions or error, though V doesn't have them at top level like this
@@ -124,8 +124,8 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 	}
 
 	// Prologue
-	t.addAsm("    stp x29, x30, [sp, #-16]!") // Save Frame Pointer (x29) and Link Register (x30) to stack, pre-decrement SP by 16
-	t.addAsm("    mov x29, sp")               // Set current stack pointer as the new Frame Pointer
+	t.addAsm("    STP X29, X30, [SP, #-16]") // Save Frame Pointer (x29) and Link Register (x30) to stack, pre-decrement SP by 16
+	t.addAsm("    MOV X29, SP")              // Set current stack pointer as the new Frame Pointer
 
 	// TODO: Allocate space for local variables based on function needs
 
@@ -137,14 +137,23 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 	// Ensure a return path even if no explicit return statement for void functions (like main often is implicitly)
 	// For non-void functions, an explicit return statement should handle loading the return value.
 	// For main, or functions ending without explicit return, this provides a standard exit.
-	if node.Name != nil {
-		t.addAsm(".L%s_epilogue:", node.Name.Name) // Label for potential jumps to epilogue
+	// Epilogue for main/_start should handle process exit.
+	// For other functions, it's a standard return.
+	if node.Name != nil && node.Name.Name == "main" {
+		// Exit syscall for _start
+		t.addAsm("    MOV X8, #93") // exit syscall number
+		t.addAsm("    MOV X0, #0")  // exit code 0
+		t.addAsm("    SVC #0")      // trigger syscall
 	} else {
-		t.addAsm(".L_anonymous_func_%d_epilogue:", t.stringCounter-1) // Match potential anonymous label
+		if node.Name != nil {
+			t.addAsm(".L%s_epilogue:", node.Name.Name) // Label for potential jumps to epilogue
+		} else {
+			t.addAsm(".L_anonymous_func_%d_epilogue:", t.stringCounter-1) // Match potential anonymous label
+		}
+		t.addAsm("    MOV W0, #0")              // Default return code 0 for other functions
+		t.addAsm("    LDP X29, X30, [SP], #16") // Restore FP, LR from stack, post-increment SP by 16
+		t.addAsm("    RET")
 	}
-	t.addAsm("    mov w0, #0") // Default return code 0 for main, or if function is void-like
-	t.addAsm("    ldp x29, x30, [sp], #16") // Restore FP, LR from stack, post-increment SP by 16
-	t.addAsm("    ret")
 	t.addAsm("") // Add a blank line for readability after function definition
 	t.currentFuncDef = nil
 	return nil
@@ -170,10 +179,23 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting VarDecl")
 	}
-	// TODO: Implement VarDecl translation (e.g., memory allocation)
-	if node.Initializer != nil {
-		node.Initializer.Accept(t)
+	if node.Name == nil {
+		return nil // Should not happen in a valid program
 	}
+	varName := node.Name.Name
+	initialValue := "0" // Default to 0 if no initializer
+
+	if node.Initializer != nil {
+		// For now, only handle integer literal initializers
+		if intLit, ok := node.Initializer.(*ast.IntegerLiteral); ok {
+			initialValue = intLit.Value
+		}
+		// TODO: Handle other initializer types
+	}
+	// Add to .data section for global/static variables.
+	// Note: This assumes all VarDecls are global. Local variables would need stack allocation.
+	t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word %s", varName, initialValue))
+
 	return nil
 }
 
@@ -331,7 +353,7 @@ func (t *Translator) VisitTypeOfExpr(node *ast.TypeOfExpr) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting TypeOfExpr")
 	}
-	// TODO: Implement TypeOfExpr translation
+	// TODO: Implement TypeOfExpr translation (usually for type checking or metadata)
 	// Example: node.Expression.Accept(t)
 	return nil
 }
@@ -444,49 +466,62 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 
 	if ident, ok := node.Function.(*ast.IdentifierExpr); ok {
 		if ident.Name == "println" {
-			t.needsPrintf = true
-			// Assuming println takes one string argument for now.
-			if len(node.Arguments) == 1 {
-				// The argument itself needs to be visited to get its value/label.
-				// VisitStringLiteral should return the label of the string in .data section.
-				argResult := node.Arguments[0].Accept(t)
-				argLabel, isStrLabel := argResult.(string)
-
-				if !isStrLabel {
-					// TODO: Handle non-string arguments to println, or type errors.
-					// For now, we'll assume it was a string literal that returned its label.
-					fmt.Fprintf(os.Stderr, "Error: println argument was not a string literal or did not return a label.\n")
-					return nil
-				}
-
-				// ARM64 calling convention: arguments in x0, x1, ...
-				// For printf(format, arg1, ...):
-				// x0 = address of format string
-				// x1 = first data argument
-
-				// Create a format string for printf: "%s\n"
-				// The AST string literal value includes quotes, e.g. "Hello".
-				// Our addStringData expects the raw content.
-				formatStrLabel := t.addStringData("%s\n") // Raw string, no outer quotes
-
-				t.addAsm("    ldr x0, =%s", formatStrLabel) // Load address of format string into x0
-				t.addAsm("    ldr x1, =%s", argLabel)     // Load address of the argument string into x1
-				t.addAsm("    bl printf")                 // Branch with link to printf
-			} else {
-				// TODO: Handle wrong number of arguments for println
-				fmt.Fprintf(os.Stderr, "Error: println called with %d arguments, expected 1.\n", len(node.Arguments))
+			// Implement println using the 'write' syscall for ARM64
+			if len(node.Arguments) != 1 {
+				fmt.Fprintf(os.Stderr, "Error: println called with %%d arguments, expected 1.\n", len(node.Arguments))
+				return nil
 			}
-			return nil // Result of println is typically void/not used
+
+			strLit, ok := node.Arguments[0].(*ast.StringLiteral)
+			if !ok {
+				fmt.Fprintf(os.Stderr, "Error: println argument must be a string literal, but got %%T\n", node.Arguments[0])
+				return nil
+			}
+
+			// The AST node `strLit.Value` already contains the unquoted string content.
+			// For println, we append a newline character.
+			stringToPrint := strLit.Value + "\n"
+			length := len(stringToPrint)
+
+			// The assembler expects the string for .asciz to be C-escaped.
+			// We need to re-escape our raw string for the assembler.
+			var sb strings.Builder
+			for _, r := range stringToPrint {
+				switch r {
+				case '\n':
+					sb.WriteString("\\n")
+				case '\t':
+					sb.WriteString("\\t")
+				case '"':
+					sb.WriteString("\\\"")
+				case '\\':
+					sb.WriteString("\\\\")
+				default:
+					sb.WriteRune(r)
+				}
+			}
+			escapedString := sb.String()
+
+			// Add the final, escaped string to the .data section
+			label := t.addStringData(escapedString)
+
+			// Generate ARM64 syscall for 'write'
+			// syscall number for write is 64
+			// X0 = file descriptor (1 for stdout)
+			// X1 = pointer to buffer (our string)
+			// X2 = count (length of our string)
+			t.addAsm("    // Syscall to print string with newline")
+			t.addAsm("    MOV X8, #64")
+			t.addAsm("    MOV X0, #1")
+			t.addAsm("    LDR X1, =%s", label)
+			t.addAsm("    MOV X2, #%d", length)
+			t.addAsm("    SVC #0")
+
+			return nil
 		}
 	}
 
 	// Generic function call (not yet implemented)
-	// node.Function.Accept(t) // This would evaluate the function expression itself
-	// for _, arg := range node.Arguments {
-	// 	arg.Accept(t) // This would evaluate arguments
-	// }
-	// TODO: Implement general function call mechanism (setup stack, call, cleanup)
-	// For now, if it's not println, we don't generate code for it.
 	if t.DebugMode {
 		fmt.Printf("Translator.VisitCallExpr: Non-println call to %s not yet implemented.\n", node.Function.String())
 	}
@@ -525,7 +560,7 @@ func (t *Translator) VisitStringLiteral(node *ast.StringLiteral) interface{} {
 	// TODO: Handle escape sequences within the string if V lang supports them (e.g., \n, \t)
 	// For now, assuming rawValue is what we want between the .asciz "".
 	label := t.addStringData(rawValue) // addStringData now handles quoting for .asciz
-	return label // Return the label for this string in the .data section
+	return label                       // Return the label for this string in the .data section
 }
 
 func (t *Translator) VisitCharLiteral(node *ast.CharLiteral) interface{} {

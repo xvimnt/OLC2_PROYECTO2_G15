@@ -1,0 +1,8 @@
+OLC2_PROYECTO1_G15.exe
+
+# Ignorar archivos generados del AST en la carpeta gui
+gui/arbol_cst.svg
+gui/arbol_cst.png
+
+# Ignore parser directory
+parser/*

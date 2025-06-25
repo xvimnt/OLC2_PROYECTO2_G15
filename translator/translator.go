@@ -461,7 +461,6 @@ func (t *Translator) VisitFieldAccessExpr(node *ast.FieldAccessExpr) interface{}
 
 func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 	if t.DebugMode {
-		// Enhanced debugging
 		if ident, ok := node.Function.(*ast.IdentifierExpr); ok {
 			fmt.Printf("Translator.VisitCallExpr: Visiting call to identifier: '%s'\n", ident.Name)
 		} else {
@@ -469,33 +468,33 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 		}
 	}
 
-	if ident, ok := node.Function.(*ast.IdentifierExpr); ok && ident.Name == "println!" {
-		for _, arg := range node.Arguments {
-			if strLit, ok := arg.(*ast.StringLiteral); ok {
-				// Add the string to the .data section
-				strLabel := t.addStringData(strLit.Value + "\n") // Add newline for println
-				strLen := len(strLit.Value) + 1
+	if ident, ok := node.Function.(*ast.IdentifierExpr); ok {
+		// Special handling for println! (Note: the '!' is handled by grammar, name is 'println')
+		if ident.Name == "println" {
+			for _, arg := range node.Arguments {
+				if strLit, ok := arg.(*ast.StringLiteral); ok {
+					// Add the string to the .data section
+					strLabel := t.addStringData(strLit.Value + "\n")
+					strLen := len(strLit.Value) + 1
 
-				// Generate syscall for write
-				t.addAsm("    // Syscall: write(fd=1, buf=%s, count=%d)", strLabel, strLen)
-				t.addAsm("    MOV X8, #64")      // syscall number for write
-				t.addAsm("    MOV X0, #1")       // file descriptor 1 (stdout)
-				t.addAsm("    LDR X1, =%s", strLabel) // address of the string
-				t.addAsm("    MOV X2, #%d", strLen) // length of the string
-				t.addAsm("    SVC #0")           // make the syscall
-			} else {
-				// Fallback for non-string arguments
-				fmt.Fprintf(os.Stderr, "Warning: println argument is not a string literal, skipping.\n")
+					// Generate ARM64 syscall for write
+					t.addAsm("    // Syscall: write(fd=1, buf, count)")
+					t.addAsm("    MOV X8, #64")      // write syscall number
+					t.addAsm("    MOV X0, #1")       // fd: stdout
+					t.addAsm("    LDR X1, =%s", strLabel) // buf: address of the string
+					t.addAsm("    MOV X2, #%d", strLen) // count: length of the string
+					t.addAsm("    SVC #0")           // trigger syscall
+				}
+				// TODO: Handle other argument types for println
 			}
+		} else {
+			// Generic function call handling
+			// TODO: Push arguments onto the stack according to ARM64 calling convention
+			t.addAsm("    BL %s", ident.Name)
 		}
 	} else {
-		// Handle other function calls (including user-defined)
-		// This is a simplified placeholder for calling other functions
-		if node.Function != nil {
-			if name, ok := node.Function.Accept(t).(string); ok {
-				t.addAsm("    BL %s", name)
-			}
-		}
+		// TODO: Handle other function expression types (e.g., method calls)
+		fmt.Fprintf(os.Stderr, "Translator Error: Non-identifier function calls not yet supported\n")
 	}
 	return nil
 }

@@ -7,10 +7,3 @@ gui/arbol_cst.png
 
 # Ignore parser directory
 parser/*
-
-# Ignore output files
-output.exe
-output.s
-
-# Ignore test.v
-test.v

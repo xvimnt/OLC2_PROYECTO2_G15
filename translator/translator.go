@@ -728,6 +728,8 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 			t.addAsm("    ADD X%d, X%d, X%d", resultReg, leftResult.Reg, rightResult.Reg)
 		case "-":
 			t.addAsm("    SUB X%d, X%d, X%d", resultReg, leftResult.Reg, rightResult.Reg)
+		case "*":
+			t.addAsm("    MUL X%d, X%d, X%d", resultReg, leftResult.Reg, rightResult.Reg)
 		default:
 			panic(fmt.Sprintf("Unsupported integer operator: %s", node.Operator))
 		}
@@ -746,6 +748,8 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 			t.addAsm("    FADD D%d, D%d, D%d", reg, leftResult.Reg, rightResult.Reg)
 		case "-":
 			t.addAsm("    FSUB D%d, D%d, D%d", reg, leftResult.Reg, rightResult.Reg)
+		case "*":
+			t.addAsm("    FMUL D%d, D%d, D%d", reg, leftResult.Reg, rightResult.Reg)
 		default:
 			panic(fmt.Sprintf("Unsupported float operator: %s", node.Operator))
 		}

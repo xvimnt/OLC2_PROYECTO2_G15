@@ -46,7 +46,7 @@ test-v-flow:
 	@echo "--- [1/4] Building the compiler ---"
 	$(MAKE) build
 	@echo "--- [2/4] Translating test.v to ARM assembly ---"
-	.\$(BINARY_NAME) translate test.v
+	powershell -Command "$$env:VLANG_DEBUG='true'; .\$(BINARY_NAME) translate test.v"
 	@echo "--- [3/4] Building the ARM executable ---"
 	$(MAKE) build-arm
 	@echo "--- [4/4] Running the ARM executable with QEMU ---"

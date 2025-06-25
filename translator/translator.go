@@ -97,6 +97,8 @@ func (t *Translator) VisitFieldDecl(node *ast.FieldDecl) interface{} {
 	return nil
 }
 
+
+
 func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 	if t.DebugMode {
 		if node.Name != nil {
@@ -136,7 +138,9 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 	// Epilogue for main/_start should handle process exit.
 	// For other functions, it's a standard return.
 	if node.Name != nil && node.Name.Name == "main" {
-		// Exit syscall for _start
+		// The body of main will now contain the syscalls for println.
+		// We still need to ensure the process exits correctly.
+		t.addAsm("    // Syscall: exit(code=0)")
 		t.addAsm("    MOV X8, #93") // exit syscall number
 		t.addAsm("    MOV X0, #0")  // exit code 0
 		t.addAsm("    SVC #0")      // trigger syscall
@@ -457,49 +461,41 @@ func (t *Translator) VisitFieldAccessExpr(node *ast.FieldAccessExpr) interface{}
 
 func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting CallExpr")
-	}
-
-	if ident, ok := node.Function.(*ast.IdentifierExpr); ok {
-		if ident.Name == "println" {
-			// Implement println using the 'write' syscall for ARM64
-			if len(node.Arguments) != 1 {
-				fmt.Fprintf(os.Stderr, "Error: println called with %d arguments, expected 1.\n", len(node.Arguments))
-				return nil
-			}
-
-			strLit, ok := node.Arguments[0].(*ast.StringLiteral)
-			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: println argument must be a string literal, but got %T\n", node.Arguments[0])
-				return nil
-			}
-
-			// For println, we append a newline character.
-			stringToPrint := strLit.Value + "\n"
-			length := len(stringToPrint)
-
-			// Add the raw string to the .data section; addStringData will handle quoting/escaping.
-			label := t.addStringData(stringToPrint)
-
-			// Generate ARM64 syscall for 'write'
-			// syscall number for write is 64
-			// X0 = file descriptor (1 for stdout)
-			// X1 = pointer to buffer (our string)
-			// X2 = count (length of our string)
-			t.addAsm("    // Syscall to print string with newline")
-			t.addAsm("    MOV X8, #64")
-			t.addAsm("    MOV X0, #1")
-			t.addAsm("    LDR X1, =%s", label)
-			t.addAsm("    MOV X2, #%d", length)
-			t.addAsm("    SVC #0")
-
-			return nil
+		// Enhanced debugging
+		if ident, ok := node.Function.(*ast.IdentifierExpr); ok {
+			fmt.Printf("Translator.VisitCallExpr: Visiting call to identifier: '%s'\n", ident.Name)
+		} else {
+			fmt.Printf("Translator.VisitCallExpr: Visiting call to expression of type %T\n", node.Function)
 		}
 	}
 
-	// Generic function call (not yet implemented)
-	if t.DebugMode {
-		fmt.Printf("Translator.VisitCallExpr: Non-println call to %s not yet implemented.\n", node.Function.String())
+	if ident, ok := node.Function.(*ast.IdentifierExpr); ok && ident.Name == "println!" {
+		for _, arg := range node.Arguments {
+			if strLit, ok := arg.(*ast.StringLiteral); ok {
+				// Add the string to the .data section
+				strLabel := t.addStringData(strLit.Value + "\n") // Add newline for println
+				strLen := len(strLit.Value) + 1
+
+				// Generate syscall for write
+				t.addAsm("    // Syscall: write(fd=1, buf=%s, count=%d)", strLabel, strLen)
+				t.addAsm("    MOV X8, #64")      // syscall number for write
+				t.addAsm("    MOV X0, #1")       // file descriptor 1 (stdout)
+				t.addAsm("    LDR X1, =%s", strLabel) // address of the string
+				t.addAsm("    MOV X2, #%d", strLen) // length of the string
+				t.addAsm("    SVC #0")           // make the syscall
+			} else {
+				// Fallback for non-string arguments
+				fmt.Fprintf(os.Stderr, "Warning: println argument is not a string literal, skipping.\n")
+			}
+		}
+	} else {
+		// Handle other function calls (including user-defined)
+		// This is a simplified placeholder for calling other functions
+		if node.Function != nil {
+			if name, ok := node.Function.Accept(t).(string); ok {
+				t.addAsm("    BL %s", name)
+			}
+		}
 	}
 	return nil
 }
@@ -669,6 +665,8 @@ func (t *Translator) VisitOptionalTypeNode(node *ast.OptionalTypeNode) interface
 	node.ElementType.Accept(t)
 	return nil
 }
+
+
 
 func (t *Translator) VisitAnonymousStructTypeNode(node *ast.AnonymousStructTypeNode) interface{} {
 	if t.DebugMode {

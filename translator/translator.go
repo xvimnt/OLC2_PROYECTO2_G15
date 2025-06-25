@@ -732,6 +732,13 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 			t.addAsm("    MUL X%d, X%d, X%d", resultReg, leftResult.Reg, rightResult.Reg)
 		case "/":
 			t.addAsm("    SDIV X%d, X%d, X%d", resultReg, leftResult.Reg, rightResult.Reg)
+		case "%":
+			// a % n = a - (a/n) * n
+			divResultReg := t.acquireIntRegister()
+			t.addAsm("    SDIV X%d, X%d, X%d", divResultReg, leftResult.Reg, rightResult.Reg) // divResultReg = a / n
+			t.addAsm("    MUL X%d, X%d, X%d", divResultReg, divResultReg, rightResult.Reg)   // divResultReg = (a / n) * n
+			t.addAsm("    SUB X%d, X%d, X%d", resultReg, leftResult.Reg, divResultReg)      // resultReg = a - divResultReg
+			t.releaseIntRegister(divResultReg)
 		default:
 			panic(fmt.Sprintf("Unsupported integer operator: %s", node.Operator))
 		}
@@ -754,6 +761,17 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 			t.addAsm("    FMUL D%d, D%d, D%d", reg, leftResult.Reg, rightResult.Reg)
 		case "/":
 			t.addAsm("    FDIV D%d, D%d, D%d", reg, leftResult.Reg, rightResult.Reg)
+		case "%":
+			// fmod(x, y) = x - trunc(x/y) * y
+			tmp1 := t.acquireFloatRegister()
+			tmp2 := t.acquireFloatRegister()
+			t.addAsm("    // Calculating float modulo (fmod)")
+			t.addAsm("    FDIV D%d, D%d, D%d", tmp1, leftResult.Reg, rightResult.Reg) // tmp1 = x/y
+			t.addAsm("    FRINTZ D%d, D%d", tmp2, tmp1)                               // tmp2 = trunc(x/y)
+			t.addAsm("    FMUL D%d, D%d, D%d", tmp1, tmp2, rightResult.Reg)           // tmp1 = trunc(x/y) * y
+			t.addAsm("    FSUB D%d, D%d, D%d", reg, leftResult.Reg, tmp1)             // reg = x - tmp1
+			t.releaseFloatRegister(tmp1)
+			t.releaseFloatRegister(tmp2)
 		default:
 			panic(fmt.Sprintf("Unsupported float operator: %s", node.Operator))
 		}
@@ -820,10 +838,29 @@ func (t *Translator) concatenateStrings(left, right ExpressionResult) Expression
 
 func (t *Translator) VisitUnaryExpr(node *ast.UnaryExpr) interface{} {
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting UnaryExpr")
+		fmt.Printf("Translator.Visiting UnaryExpr: %s\n", node.Operator)
 	}
-	// TODO: Implement UnaryExpr translation
-	return nil
+
+	operandResult := node.Right.Accept(t).(ExpressionResult)
+
+	switch node.Operator {
+	case "-":
+		switch operandResult.Type {
+		case TypeInt:
+			// NEG instruction negates the value in a register.
+			// It's a two-operand instruction, so we can use the same register for source and destination.
+			t.addAsm("    NEG X%d, X%d", operandResult.Reg, operandResult.Reg)
+			return operandResult // The result is in the same register, with the same type.
+		case TypeFloat:
+			// FNEG for floating-point negation.
+			t.addAsm("    FNEG D%d, D%d", operandResult.Reg, operandResult.Reg)
+			return operandResult // The result is in the same register, with the same type.
+		default:
+			panic(fmt.Sprintf("Unsupported type for unary minus operator: %s", operandResult.Type))
+		}
+	default:
+		panic(fmt.Sprintf("Unsupported unary operator: %s", node.Operator))
+	}
 }
 
 func (t *Translator) VisitParenExpr(node *ast.ParenExpr) interface{} {
@@ -939,7 +976,9 @@ func (t *Translator) handlePrintln(args []ast.Expression) {
 	// 1. Build format string and evaluate expressions
 	for _, arg := range args {
 		if strLit, ok := arg.(*ast.StringLiteral); ok {
-			formatString.WriteString(strLit.Value)
+			// Sanitize the string to escape any '%' characters for printf.
+			sanitizedStr := strings.ReplaceAll(strings.Trim(strLit.Value, "\""), "%", "%%")
+			formatString.WriteString(sanitizedStr)
 		} else {
 			result := arg.Accept(t).(ExpressionResult)
 			evaluatedArgs = append(evaluatedArgs, result)

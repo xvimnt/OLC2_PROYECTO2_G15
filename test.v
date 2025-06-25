@@ -1,3 +1,4 @@
+mut global_integer int = 100
 fn main() {
-    println("Hello from the translator!, this should be translated to ARM assembly")
+    println(global_integer)
 }

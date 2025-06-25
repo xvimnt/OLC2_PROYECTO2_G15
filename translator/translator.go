@@ -9,23 +9,25 @@ import (
 
 // Translator translates AST nodes into assembly code.
 type Translator struct {
-	asm            []string          // Stores generated .text section assembly lines
-	dataSection    []string          // Stores generated .data section assembly lines
-	stringCounter  int               // For generating unique string labels
-	needsPrintf    bool              // Tracks if printf is used (for .extern printf)
-	currentFuncDef *ast.FunctionDecl // Keep track of the current function being defined
-	DebugMode      bool
+	asm             []string          // Stores generated .text section assembly lines
+	dataSection     []string          // Stores generated .data section assembly lines
+	stringCounter   int               // For generating unique string labels
+	needsPrintf     bool              // Tracks if printf is used (for .extern printf)
+	hasIntFormatStr bool              // Tracks if the integer format string has been added
+	currentFuncDef  *ast.FunctionDecl // Keep track of the current function being defined
+	DebugMode       bool
 }
 
 // NewTranslator creates a new Translator instance.
 func NewTranslator(debugMode bool) *Translator {
 	return &Translator{
-		asm:            make([]string, 0),
-		dataSection:    make([]string, 0),
-		stringCounter:  0,
-		needsPrintf:    false,
-		currentFuncDef: nil,
-		DebugMode:      debugMode,
+		asm:             make([]string, 0),
+		dataSection:     make([]string, 0),
+		stringCounter:   0,
+		needsPrintf:     false,
+		hasIntFormatStr: false,
+		currentFuncDef:  nil,
+		DebugMode:       debugMode,
 	}
 }
 
@@ -51,6 +53,9 @@ func (t *Translator) GetAssembly() []string {
 
 	// .text section
 	if len(t.asm) > 0 {
+		if t.needsPrintf {
+			finalAsm = append(finalAsm, ".extern printf")
+		}
 		finalAsm = append(finalAsm, ".text")
 		finalAsm = append(finalAsm, t.asm...)
 	}
@@ -469,33 +474,46 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 	}
 
 	if ident, ok := node.Function.(*ast.IdentifierExpr); ok {
-		// Special handling for println! (Note: the '!' is handled by grammar, name is 'println')
+		// Special handling for println (the '!' was a grammar detail)
 		if ident.Name == "println" {
 			for _, arg := range node.Arguments {
-				if strLit, ok := arg.(*ast.StringLiteral); ok {
-					// Add the string to the .data section
-					strLabel := t.addStringData(strLit.Value + "\n")
-					strLen := len(strLit.Value) + 1
-
-					// Generate ARM64 syscall for write
+				switch v := arg.(type) {
+				case *ast.StringLiteral:
+					// For strings, we use the 'write' syscall directly.
+					strLabel := t.addStringData(v.Value + "\n")
+					strLen := len(v.Value) + 1
 					t.addAsm("    // Syscall: write(fd=1, buf, count)")
 					t.addAsm("    MOV X8, #64")      // write syscall number
 					t.addAsm("    MOV X0, #1")       // fd: stdout
 					t.addAsm("    LDR X1, =%s", strLabel) // buf: address of the string
 					t.addAsm("    MOV X2, #%d", strLen) // count: length of the string
 					t.addAsm("    SVC #0")           // trigger syscall
+				case *ast.IdentifierExpr:
+					// For other types like integers, we'll use printf.
+					// This assumes the identifier refers to a global integer variable.
+					t.needsPrintf = true
+					if !t.hasIntFormatStr {
+						t.dataSection = append(t.dataSection, "int_fmt: .asciz \"%d\\n\"")
+						t.hasIntFormatStr = true
+					}
+					varName := v.Name
+					t.addAsm("    // Print integer variable '%s' using printf", varName)
+					t.addAsm("    LDR X0, =int_fmt")    // 1st arg to printf: format string
+					t.addAsm("    LDR X1, =%s", varName) // Load address of the global variable
+					t.addAsm("    LDR W1, [X1]")        // Load the 32-bit integer value into W1 (2nd arg)
+					t.addAsm("    BL printf")
+				default:
+					fmt.Fprintf(os.Stderr, "Warning: println for type %T not yet supported.\n", v)
 				}
-				// TODO: Handle other argument types for println
 			}
 		} else {
 			// Generic function call handling
-			// TODO: Push arguments onto the stack according to ARM64 calling convention
 			t.addAsm("    BL %s", ident.Name)
 		}
 	} else {
-		// TODO: Handle other function expression types (e.g., method calls)
 		fmt.Fprintf(os.Stderr, "Translator Error: Non-identifier function calls not yet supported\n")
 	}
+
 	return nil
 }
 

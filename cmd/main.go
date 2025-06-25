@@ -322,11 +322,9 @@ func translateFile(filePath string, debugMode bool) {
 	assembly := trans.GetAssembly()
 
 	// Print the assembly
-	fmt.Println("--- Generated assembly code ---")
 	for _, line := range assembly {
 		fmt.Println(line)
 	}
-	fmt.Println("--- End of assembly code ---")
 
 	// Write the assembly to output.s
 	outputFile, err := os.Create("output.s")

@@ -3,6 +3,8 @@ package translator
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 
 	"github.com/xvimnt/OLC2_PROYECTO2_G15/ast"
 )
@@ -153,23 +155,14 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 	// For main, or functions ending without explicit return, this provides a standard exit.
 	// Epilogue for main/_start should handle process exit.
 	// For other functions, it's a standard return.
-	if node.Name != nil && node.Name.Name == "main" {
-		// Main function epilogue: exit syscall
-		// Instead of returning (which requires a C runtime), we use a syscall to exit the process.
-		t.addAsm("    // Syscall: exit(status=0)")
-		t.addAsm("    MOV X8, #93     // exit syscall number")
-		t.addAsm("    MOV X0, #0      // exit status code")
-		t.addAsm("    SVC #0          // trigger syscall")
+	if node.Name != nil {
+		t.addAsm(".L%s_epilogue:", node.Name.Name) // Label for potential jumps to epilogue
 	} else {
-		if node.Name != nil {
-			t.addAsm(".L%s_epilogue:", node.Name.Name) // Label for potential jumps to epilogue
-		} else {
-			t.addAsm(".L_anonymous_func_%d_epilogue:", t.stringCounter-1) // Match potential anonymous label
-		}
-		t.addAsm("    MOV W0, #0")              // Default return code 0 for other functions
-		t.addAsm("    LDP X29, X30, [SP], #16") // Restore FP, LR from stack, post-increment SP by 16
-		t.addAsm("    RET")
+		t.addAsm(".L_anonymous_func_%d_epilogue:", t.stringCounter-1) // Match potential anonymous label
 	}
+	t.addAsm("    MOV W0, #0")              // Default return code 0 for other functions
+	t.addAsm("    LDP X29, X30, [SP], #16") // Restore FP, LR from stack, post-increment SP by 16
+	t.addAsm("    RET")
 	t.addAsm("") // Add a blank line for readability after function definition
 	t.currentFuncDef = nil
 	return nil
@@ -502,15 +495,7 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 			for _, arg := range node.Arguments {
 				switch v := arg.(type) {
 				case *ast.StringLiteral:
-					// For string literals, we use the 'write' syscall directly.
-					strLabel := t.addStringData(v.Value + "\n")
-					strLen := len(v.Value) + 1
-					t.addAsm("    // Syscall: write(fd=1, buf, count)")
-					t.addAsm("    MOV X8, #64")      // write syscall number
-					t.addAsm("    MOV X0, #1")       // fd: stdout
-					t.addAsm("    LDR X1, =%s", strLabel) // buf: address of the string
-					t.addAsm("    MOV X2, #%d", strLen) // count: length of the string
-					t.addAsm("    SVC #0")           // trigger syscall
+					t.handlePrintlnStringLiteral(v)
 				case *ast.IdentifierExpr:
 					// For variables, we use printf and the symbol table to determine the type.
 					varName := v.Name
@@ -554,6 +539,109 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 	}
 
 	return nil
+}
+
+// handlePrintlnStringLiteral processes a string literal within a 'println' call,
+// handling string interpolation for variables.
+func (t *Translator) handlePrintlnStringLiteral(node *ast.StringLiteral) {
+	// Raw string value, without quotes.
+	rawValue := node.Value
+	if len(rawValue) >= 2 && rawValue[0] == '"' && rawValue[len(rawValue)-1] == '"' {
+		rawValue = rawValue[1 : len(rawValue)-1]
+	}
+
+	// Regex to find variables like $var
+	re := regexp.MustCompile(`\$([a-zA-Z_]\w*)`)
+	matches := re.FindAllStringSubmatchIndex(rawValue, -1)
+
+	if len(matches) == 0 {
+		// No variables found, use the simple 'write' syscall for efficiency.
+		strLabel := t.addStringData(rawValue + "\n")
+		strLen := len(rawValue) + 1
+		t.addAsm("    // Syscall: write(fd=1, buf, count)")
+		t.addAsm("    MOV X8, #64")      // write syscall number
+		t.addAsm("    MOV X0, #1")       // fd: stdout
+		t.addAsm("    LDR X1, =%s", strLabel) // buf: address of the string
+		t.addAsm("    MOV X2, #%d", strLen) // count: length of the string
+		t.addAsm("    SVC #0")           // trigger syscall
+		return
+	}
+
+	// Variables found, we need to use printf.
+	t.needsPrintf = true
+	var formatString strings.Builder
+	var varNames []string
+	lastIndex := 0
+
+	for _, match := range matches {
+		// Append the literal part before the variable.
+		formatString.WriteString(rawValue[lastIndex:match[0]])
+
+		// Get the variable name from the capture group.
+		varName := rawValue[match[2]:match[3]]
+		varNames = append(varNames, varName)
+
+		// Look up variable type and add the correct format specifier.
+		varType, ok := t.symbolTable[varName]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Translator Error: undefined variable '%s' in string literal\n", varName)
+			// Add a placeholder to avoid breaking the format string structure.
+			formatString.WriteString("<undef_var>")
+		} else {
+			switch varType {
+			case TypeInt:
+				formatString.WriteString("%d")
+			case TypeString:
+				formatString.WriteString("%s")
+			default:
+				// Handle other types or default to a generic representation.
+				formatString.WriteString("<unsupported_type>")
+			}
+		}
+		lastIndex = match[1]
+	}
+	// Append the rest of the string after the last variable.
+	formatString.WriteString(rawValue[lastIndex:])
+	formatString.WriteString("\n") // println adds a newline.
+
+	// Add the final format string to the .data section.
+	formatLabel := t.addStringData(formatString.String())
+
+	// Load format string address into X0 (the first argument for printf).
+	t.addAsm("    LDR X0, =%s", formatLabel)
+
+	// Load variable values/addresses into registers X1, X2, ...
+	for i, varName := range varNames {
+		if i >= 7 { // printf in ARM64 takes first 8 args in X0-X7. X0 is format string.
+			fmt.Fprintf(os.Stderr, "Warning: Too many arguments for printf in string interpolation. Only the first 7 variables are supported.\n")
+			break
+		}
+
+		varType, ok := t.symbolTable[varName]
+		if !ok {
+			// If variable was undefined, we can't load it. We need to pass a dummy value.
+			// For simplicity, we'll load 0. The format string will show the error.
+			t.addAsm("    MOV X%d, #0", i+1)
+			continue
+		}
+
+		regNum := i + 1
+		reg := fmt.Sprintf("X%d", regNum)
+
+		switch varType {
+		case TypeInt:
+			// For integers, load the value.
+			t.addAsm("    LDR %s, =%s", reg, varName) // Load address of the global variable.
+			t.addAsm("    LDR W%d, [%s]", regNum, reg) // Load the 32-bit word value from the address.
+		case TypeString:
+			// For strings, load the address of the string data.
+			t.addAsm("    LDR %s, =%s", reg, varName) // Load address of the pointer variable.
+			t.addAsm("    LDR %s, [%s]", reg, reg)    // Dereference the pointer to get the string address.
+		}
+	}
+
+	// Call printf.
+	t.addAsm("    BL printf")
 }
 
 // Literals

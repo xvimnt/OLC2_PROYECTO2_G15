@@ -19,7 +19,7 @@ ANTLR_URL=https://www.antlr.org/download/antlr-4.12.0-complete.jar
 
 # ARM Cross-compilation parameters
 ARM_GCC=aarch64-none-linux-gnu-gcc
-ARM_FLAGS=-Wl,-e,main -nostartfiles -static
+ARM_FLAGS=-static
 ARM_OUTPUT=output.exe
 ARM_SOURCE=output.s
 
@@ -35,7 +35,7 @@ build:
 build-arm:
 	@echo "Building ARM executable from $(ARM_SOURCE)..."
 	$(ARM_GCC) $(ARM_FLAGS) -o $(ARM_OUTPUT) $(ARM_SOURCE)
-
+ 
 # Run the ARM executable using QEMU
 run-arm:
 	@echo "Running ARM executable with QEMU..."

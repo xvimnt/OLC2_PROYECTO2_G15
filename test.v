@@ -1,4 +1,10 @@
-mut _global_string string = "I am a global variable."
+fn A_Function() {
+    println("Called A_Function (uppercase)")
+}
+fn a_function() {
+    println("Called a_function (lowercase)")
+}
 fn main() {
-    println(_global_string)
+    A_Function()
+    a_function()
 }

@@ -19,7 +19,7 @@ ANTLR_URL=https://www.antlr.org/download/antlr-4.12.0-complete.jar
 
 # ARM Cross-compilation parameters
 ARM_GCC=aarch64-none-linux-gnu-gcc
-ARM_FLAGS=-nostartfiles
+ARM_FLAGS=-Wl,-e,main -nostartfiles -static
 ARM_OUTPUT=output.exe
 ARM_SOURCE=output.s
 
@@ -39,7 +39,7 @@ build-arm:
 # Run the ARM executable using QEMU
 run-arm:
 	@echo "Running ARM executable with QEMU..."
-	wsl /usr/bin/qemu-aarch64-static -L "/mnt/c/Program Files (x86)/Arm GNU Toolchain aarch64-none-linux-gnu/14.2 rel1/aarch64-none-linux-gnu/libc" "/mnt/c/Users/matri/OneDrive/Documents/USAC/OLC2_PROYECTO2_G15/output.exe"
+	wsl /usr/bin/qemu-aarch64-static "/mnt/c/Users/matri/OneDrive/Documents/USAC/OLC2_PROYECTO2_G15/output.exe"
 
 # Run the full build, translate, build-arm, and run-arm flow for test.v
 test-v-flow:

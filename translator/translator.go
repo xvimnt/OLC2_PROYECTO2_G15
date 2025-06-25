@@ -138,7 +138,7 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 	}
 
 	// Prologue
-	t.addAsm("    STP X29, X30, [SP, #-16]") // Save Frame Pointer (x29) and Link Register (x30) to stack, pre-decrement SP by 16
+	t.addAsm("    STP X29, X30, [SP, #-16]!") // Save FP, LR to stack, pre-decrement SP by 16 (write-back)
 	t.addAsm("    MOV X29, SP")              // Set current stack pointer as the new Frame Pointer
 
 	// TODO: Allocate space for local variables based on function needs
@@ -154,10 +154,12 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 	// Epilogue for main/_start should handle process exit.
 	// For other functions, it's a standard return.
 	if node.Name != nil && node.Name.Name == "main" {
-		// Main function epilogue
-		t.addAsm("    // Return from main, letting C runtime handle exit")
-		t.addAsm("    MOV W0, #0      // Return 0 from main")
-		t.addAsm("    RET")
+		// Main function epilogue: exit syscall
+		// Instead of returning (which requires a C runtime), we use a syscall to exit the process.
+		t.addAsm("    // Syscall: exit(status=0)")
+		t.addAsm("    MOV X8, #93     // exit syscall number")
+		t.addAsm("    MOV X0, #0      // exit status code")
+		t.addAsm("    SVC #0          // trigger syscall")
 	} else {
 		if node.Name != nil {
 			t.addAsm(".L%s_epilogue:", node.Name.Name) // Label for potential jumps to epilogue

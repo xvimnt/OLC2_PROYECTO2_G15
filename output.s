@@ -1,20 +1,19 @@
 .data
-global_integer: .word 100
-int_fmt: .asciz "%d\n"
+str0: .asciz "I am a global variable."
+_global_string: .quad str0
+str_fmt: .asciz "%s\n"
 
 .extern printf
 .text
-.global _start
-_start:
+.global main
+main:
     STP X29, X30, [SP, #-16]
     MOV X29, SP
-    // Print integer variable 'global_integer' using printf
-    LDR X0, =int_fmt
-    LDR X1, =global_integer
-    LDR W1, [X1]
+    LDR X0, =str_fmt
+    LDR X1, =_global_string
+    LDR X1, [X1]
     BL printf
-    // Syscall: exit(code=0)
-    MOV X8, #93
-    MOV X0, #0
-    SVC #0
+    // Return from main, letting C runtime handle exit
+    MOV W0, #0      // Return 0 from main
+    RET
 

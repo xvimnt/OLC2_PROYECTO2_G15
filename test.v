@@ -1,4 +1,4 @@
-mut global_integer int = 100
+mut _global_string string = "I am a global variable."
 fn main() {
-    println(global_integer)
+    println(_global_string)
 }

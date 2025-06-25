@@ -2,32 +2,45 @@ package translator
 
 import (
 	"fmt"
-	"os" // Added for Fprintf to os.Stderr for errors
+	"os"
 
 	"github.com/xvimnt/OLC2_PROYECTO2_G15/ast"
 )
 
+// VarType represents the type of a variable within the translator.
+type VarType int
+
+const (
+	TypeUnknown VarType = iota
+	TypeInt
+	TypeString
+)
+
 // Translator translates AST nodes into assembly code.
 type Translator struct {
-	asm             []string          // Stores generated .text section assembly lines
-	dataSection     []string          // Stores generated .data section assembly lines
-	stringCounter   int               // For generating unique string labels
-	needsPrintf     bool              // Tracks if printf is used (for .extern printf)
-	hasIntFormatStr bool              // Tracks if the integer format string has been added
-	currentFuncDef  *ast.FunctionDecl // Keep track of the current function being defined
-	DebugMode       bool
+	asm                []string          // Stores generated .text section assembly lines
+	dataSection        []string          // Stores generated .data section assembly lines
+	symbolTable        map[string]VarType
+	stringCounter      int               // For generating unique string labels
+	needsPrintf        bool              // Tracks if printf is used (for .extern printf)
+	hasIntFormatStr    bool              // Tracks if the integer format string has been added
+	hasStringFormatStr bool              // Tracks if the string format string has been added
+	currentFuncDef     *ast.FunctionDecl // Keep track of the current function being defined
+	DebugMode          bool
 }
 
 // NewTranslator creates a new Translator instance.
 func NewTranslator(debugMode bool) *Translator {
 	return &Translator{
-		asm:             make([]string, 0),
-		dataSection:     make([]string, 0),
-		stringCounter:   0,
-		needsPrintf:     false,
-		hasIntFormatStr: false,
-		currentFuncDef:  nil,
-		DebugMode:       debugMode,
+		asm:                make([]string, 0),
+		dataSection:        make([]string, 0),
+		symbolTable:        make(map[string]VarType),
+		stringCounter:      0,
+		needsPrintf:        false,
+		hasIntFormatStr:    false,
+		hasStringFormatStr: false,
+		currentFuncDef:     nil,
+		DebugMode:          debugMode,
 	}
 }
 
@@ -102,8 +115,6 @@ func (t *Translator) VisitFieldDecl(node *ast.FieldDecl) interface{} {
 	return nil
 }
 
-
-
 func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 	if t.DebugMode {
 		if node.Name != nil {
@@ -115,8 +126,8 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 	t.currentFuncDef = node
 
 	if node.Name != nil && node.Name.Name == "main" {
-		t.addAsm(".global _start")
-		t.addAsm("_start:")
+		t.addAsm(".global main")
+		t.addAsm("main:")
 	} else if node.Name != nil {
 		t.addAsm(".global %s", node.Name.Name)
 		t.addAsm("%s:", node.Name.Name)
@@ -143,12 +154,10 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 	// Epilogue for main/_start should handle process exit.
 	// For other functions, it's a standard return.
 	if node.Name != nil && node.Name.Name == "main" {
-		// The body of main will now contain the syscalls for println.
-		// We still need to ensure the process exits correctly.
-		t.addAsm("    // Syscall: exit(code=0)")
-		t.addAsm("    MOV X8, #93") // exit syscall number
-		t.addAsm("    MOV X0, #0")  // exit code 0
-		t.addAsm("    SVC #0")      // trigger syscall
+		// Main function epilogue
+		t.addAsm("    // Return from main, letting C runtime handle exit")
+		t.addAsm("    MOV W0, #0      // Return 0 from main")
+		t.addAsm("    RET")
 	} else {
 		if node.Name != nil {
 			t.addAsm(".L%s_epilogue:", node.Name.Name) // Label for potential jumps to epilogue
@@ -188,18 +197,29 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 		return nil // Should not happen in a valid program
 	}
 	varName := node.Name.Name
-	initialValue := "0" // Default to 0 if no initializer
 
+	// Handle initializer
 	if node.Initializer != nil {
-		// For now, only handle integer literal initializers
-		if intLit, ok := node.Initializer.(*ast.IntegerLiteral); ok {
-			initialValue = intLit.Value
+		switch init := node.Initializer.(type) {
+		case *ast.IntegerLiteral:
+			// For global integers, we define them in the data section and store their type.
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word %s", varName, init.Value))
+			t.symbolTable[varName] = TypeInt
+		case *ast.StringLiteral:
+			// For global strings, we store the string, and the variable holds its address.
+			strLabel := t.addStringData(init.Value)
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad %s", varName, strLabel))
+			t.symbolTable[varName] = TypeString
+		default:
+			// Unhandled initializer type, default to 0
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
+			t.symbolTable[varName] = TypeUnknown
 		}
-		// TODO: Handle other initializer types
+	} else {
+		// Uninitialized global variable, default to 0 and unknown type
+		t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
+		t.symbolTable[varName] = TypeUnknown
 	}
-	// Add to .data section for global/static variables.
-	// Note: This assumes all VarDecls are global. Local variables would need stack allocation.
-	t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word %s", varName, initialValue))
 
 	return nil
 }
@@ -362,6 +382,7 @@ func (t *Translator) VisitTypeOfExpr(node *ast.TypeOfExpr) interface{} {
 	// Example: node.Expression.Accept(t)
 	return nil
 }
+
 func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting BinaryExpr")
@@ -479,7 +500,7 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 			for _, arg := range node.Arguments {
 				switch v := arg.(type) {
 				case *ast.StringLiteral:
-					// For strings, we use the 'write' syscall directly.
+					// For string literals, we use the 'write' syscall directly.
 					strLabel := t.addStringData(v.Value + "\n")
 					strLen := len(v.Value) + 1
 					t.addAsm("    // Syscall: write(fd=1, buf, count)")
@@ -489,21 +510,37 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 					t.addAsm("    MOV X2, #%d", strLen) // count: length of the string
 					t.addAsm("    SVC #0")           // trigger syscall
 				case *ast.IdentifierExpr:
-					// For other types like integers, we'll use printf.
-					// This assumes the identifier refers to a global integer variable.
-					t.needsPrintf = true
-					if !t.hasIntFormatStr {
-						t.dataSection = append(t.dataSection, "int_fmt: .asciz \"%d\\n\"")
-						t.hasIntFormatStr = true
-					}
+					// For variables, we use printf and the symbol table to determine the type.
 					varName := v.Name
-					t.addAsm("    // Print integer variable '%s' using printf", varName)
-					t.addAsm("    LDR X0, =int_fmt")    // 1st arg to printf: format string
-					t.addAsm("    LDR X1, =%s", varName) // Load address of the global variable
-					t.addAsm("    LDR W1, [X1]")        // Load the 32-bit integer value into W1 (2nd arg)
-					t.addAsm("    BL printf")
+					varType, ok := t.symbolTable[varName]
+					if !ok {
+						fmt.Fprintf(os.Stderr, "Translator Error: undefined variable '%s'\n", varName)
+						return nil
+					}
+
+					t.needsPrintf = true
+					switch varType {
+					case TypeString:
+						if !t.hasStringFormatStr {
+							t.dataSection = append(t.dataSection, "str_fmt: .asciz \"%s\\n\"")
+							t.hasStringFormatStr = true
+						}
+						t.addAsm("    LDR X0, =str_fmt")
+						t.addAsm("    LDR X1, =%s", varName) // Load address of the pointer
+						t.addAsm("    LDR X1, [X1]")        // Load the pointer (address of string) into X1 (2nd arg)
+						t.addAsm("    BL printf")
+					case TypeInt:
+						if !t.hasIntFormatStr {
+							t.dataSection = append(t.dataSection, "int_fmt: .asciz \"%d\\n\"")
+							t.hasIntFormatStr = true
+						}
+						t.addAsm("    LDR X0, =int_fmt")
+						t.addAsm("    LDR X1, =%s", varName)
+						t.addAsm("    LDR W1, [X1]")
+						t.addAsm("    BL printf")
+					}
 				default:
-					fmt.Fprintf(os.Stderr, "Warning: println for type %T not yet supported.\n", v)
+					fmt.Fprintf(os.Stderr, "Warning: println for argument type %T not yet supported.\n", v)
 				}
 			}
 		} else {

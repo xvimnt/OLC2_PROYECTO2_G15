@@ -321,12 +321,21 @@ func translateFile(filePath string, debugMode bool) {
 	// Get the generated assembly
 	assembly := trans.GetAssembly()
 
-	// Print the assembly
-	fmt.Println("--- Generated Assembly ---")
-	for _, line := range assembly {
-		fmt.Println(line)
+	// Write the assembly to output.s
+	outputFile, err := os.Create("output.s")
+	if err != nil {
+		fmt.Printf("Error creating output file: %v\n", err)
+		os.Exit(1)
 	}
-	fmt.Println("--- End of Assembly ---")
+	defer outputFile.Close()
+
+	writer := bufio.NewWriter(outputFile)
+	for _, line := range assembly {
+		_, _ = writer.WriteString(line + "\n")
+	}
+	writer.Flush()
+
+	fmt.Println("Assembly code successfully written to output.s")
 
 	// Check for translator-specific errors if any were added to a similar global error list
 	// For now, assuming translator errors are handled internally or not yet implemented for global error list.

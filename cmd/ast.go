@@ -471,92 +471,49 @@ func (v *AstBuilder) VisitFunctionDeclaration(ctx *parser.FunctionDeclarationCon
 
 func (v *AstBuilder) VisitVarDecl(ctx *parser.VarDeclContext) interface{} {
 	if v.DebugMode {
-		fmt.Println("AstBuilder.Visiting VarDeclContext") // Corresponds to ast.VarDecl
+		fmt.Println("AstBuilder.Visiting VarDeclContext")
 	}
 
-	var varNameNode *ast.IdentifierExpr
-	// Assumes IDENTIFIER() returns the TerminalNode for the variable's name.
-	// This needs to match your VLangCherryParser.g4 rule for varDecl.
-	// Example: if your rule is `varDecl: 'let' name=IDENTIFIER ...;` then `ctx.GetName()` or `ctx.name` might be used.
-	// If IDENTIFIER is a direct child token: `ctx.IDENTIFIER()`
-	if idTerminal := ctx.IDENTIFIER(); idTerminal != nil {
-		nameToken := idTerminal.GetText()
-		varNameNode = &ast.IdentifierExpr{Name: nameToken}
-	} else {
-		// This indicates a potential issue if an identifier is always expected.
-
-		// Return a placeholder or error node to avoid propagating nil, though this node is invalid.
-		return &ast.VarDecl{Name: &ast.IdentifierExpr{Name: "<ERROR_VAR_NO_NAME>"}}
-	}
-
-	// Assumes MUT() returns the TerminalNode for the 'mut' keyword, if present.
+	varNameNode := &ast.IdentifierExpr{Name: ctx.IDENTIFIER().GetText()}
 	isMutable := ctx.MUT() != nil
-
-	var explicitType ast.TypeNode
-	// Assumes Type_() returns the context for the explicit type specification (e.g., rule `type_`).
-	if typeCtx := ctx.Type_(); typeCtx != nil { // This is ITypeContext
-		if v.DebugMode {
-			fmt.Printf("  VisitVarDecl: typeCtx for variable '%s' is NOT nil. Text: '%s'. Visiting it now.\n", varNameNode.Name, typeCtx.GetText())
-		}
-		typeNodeRet := typeCtx.Accept(v) // Use ANTLR visitor dispatch directly on the interface
-		if tn, ok := typeNodeRet.(ast.TypeNode); ok {
-			explicitType = tn
-			if v.DebugMode {
-				fmt.Printf("  VisitVarDecl: Visiting typeCtx for variable '%s' returned: (%T) %s\n", varNameNode.Name, explicitType, getNodeString(explicitType))
-			}
-		} else if typeNodeRet != nil {
-			if v.DebugMode {
-				fmt.Printf("  VisitVarDecl: Visiting typeCtx for variable '%s' returned non-TypeNode: (%T) %v\n", varNameNode.Name, typeNodeRet, typeNodeRet)
-			}
-		} else {
-			if v.DebugMode {
-				fmt.Printf("  VisitVarDecl: Visiting typeCtx for variable '%s' returned nil. Type context text: '%s'\n", varNameNode.Name, typeCtx.GetText())
-			}
-		}
-	} else {
-		if v.DebugMode {
-			fmt.Printf("  VisitVarDecl: typeCtx for variable '%s' is nil.\n", varNameNode.Name)
-		}
-	}
+	isShortHand := ctx.COLON_EQ() != nil
 
 	var initializer ast.Expression
-	// Assumes Expression() returns the context for the initializer expression.
-	// This needs to match your VLangCherryParser.g4 rule.
-	// Example: `varDecl: ... '=' init=expression ;` then `ctx.GetInit()` or `ctx.init`
-	// If it's just `Expression()`: `ctx.Expression()`
 	if exprCtx := ctx.Expression(); exprCtx != nil {
-		exprNodeRet := exprCtx.Accept(v) // Use Accept for correct dispatch to overridden visitor methods
-		if v.DebugMode {
-			fmt.Printf("  VisitVarDecl: exprCtx.Accept(v) for '%s' returned: (%T) %v\n", exprCtx.GetText(), exprNodeRet, exprNodeRet)
-		}
-		if expr, ok := exprNodeRet.(ast.Expression); ok {
+		// Visit the expression to get the initializer
+		if expr, ok := exprCtx.Accept(v).(ast.Expression); ok {
 			initializer = expr
-		} else if exprNodeRet != nil {
-			// TODO: Log if exprNodeRet is not nil but not ast.Expression
-			if v.DebugMode {
-				fmt.Fprintf(os.Stderr, "  VisitVarDecl Warning: Initializer expression '%s' (type %T) was visited, but result (%T) %v is not ast.Expression\n", exprCtx.GetText(), exprCtx, exprNodeRet, exprNodeRet)
-			}
-		} else {
-			// TODO: Log if exprNodeRet is nil (meaning Accept(v) returned nil)
-			if v.DebugMode {
-				fmt.Fprintf(os.Stderr, "  VisitVarDecl Error: Initializer expression '%s' (type %T) was visited, but Accept(v) returned nil\n", exprCtx.GetText(), exprCtx)
-			}
 		}
-	} else { // exprCtx IS nil
 	}
 
-	var isShortHand bool
-	// Check for short-hand assignment (:=). The ANTLR-generated parser uses COLON_EQ for this token.
-	isShortHand = ctx.COLON_EQ() != nil
+	var varType ast.TypeNode
+	if typeCtx := ctx.Type_(); typeCtx != nil {
+		// Explicit type is provided
+		if t, ok := typeCtx.Accept(v).(ast.TypeNode); ok {
+			varType = t
+		}
+	} else if isShortHand {
+		// Infer type from initializer
+		if initializer != nil {
+			switch initializer.(type) {
+			case *ast.IntegerLiteral:
+				varType = &ast.TypeName{Name: "int"}
+			case *ast.FloatLiteral:
+				varType = &ast.TypeName{Name: "float"}
+			case *ast.StringLiteral:
+				varType = &ast.TypeName{Name: "string"}
+			}
+		}
+	}
 
 	return &ast.VarDecl{
 		Name:         varNameNode,
 		IsMutable:    isMutable,
-		ExplicitType: explicitType,
+		ExplicitType: varType,
 		Initializer:  initializer,
 		IsShortHand:  isShortHand,
-		Line:         ctx.GetStart().GetLine(),   // <-- AGREGA ESTO
-		Column:       ctx.GetStart().GetColumn(), // <-- Y ESTO
+		Line:         ctx.GetStart().GetLine(),
+		Column:       ctx.GetStart().GetColumn(),
 	}
 }
 

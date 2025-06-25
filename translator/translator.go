@@ -722,20 +722,30 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 	// Perform the operation
 	switch leftResult.Type {
 	case TypeInt:
-		reg := leftResult.Reg
+		resultReg := leftResult.Reg
 		switch node.Operator {
 		case "+":
-			t.addAsm("    ADD X%d, X%d, X%d", reg, leftResult.Reg, rightResult.Reg)
+			t.addAsm("    ADD X%d, X%d, X%d", resultReg, leftResult.Reg, rightResult.Reg)
+		case "-":
+			t.addAsm("    SUB X%d, X%d, X%d", resultReg, leftResult.Reg, rightResult.Reg)
 		default:
 			panic(fmt.Sprintf("Unsupported integer operator: %s", node.Operator))
 		}
-		t.releaseIntRegister(rightResult.Reg)
-		return ExpressionResult{Reg: reg, Type: TypeInt}
+		// The result is in resultReg. The right register can be freed.
+		if rightResult.Type == TypeFloat {
+			t.releaseFloatRegister(rightResult.Reg)
+		} else {
+			// Default to releasing an integer register for Int, Bool, etc.
+			t.releaseIntRegister(rightResult.Reg)
+		}
+		return ExpressionResult{Reg: resultReg, Type: TypeInt}
 	case TypeFloat:
 		reg := leftResult.Reg
 		switch node.Operator {
 		case "+":
 			t.addAsm("    FADD D%d, D%d, D%d", reg, leftResult.Reg, rightResult.Reg)
+		case "-":
+			t.addAsm("    FSUB D%d, D%d, D%d", reg, leftResult.Reg, rightResult.Reg)
 		default:
 			panic(fmt.Sprintf("Unsupported float operator: %s", node.Operator))
 		}

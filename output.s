@@ -1,10 +1,6 @@
 .data
-i1_2: .word 10
-i2_2: .word 3
-f1_2: .double 12.5
-f2_2: .double 2.5
-str0: .asciz "\nUnary negation:   -10 = %d\n"
-str1: .asciz "Unary negation: -12.5 = %f\n"
+x_i_2: .word 20
+str0: .asciz "int += int: (20 += 5) =%d\n"
 
 .extern printf
 .text
@@ -12,20 +8,19 @@ str1: .asciz "Unary negation: -12.5 = %f\n"
 main:
     STP X29, X30, [SP, #-16]!
     MOV X29, SP
+    // --- Start of compound assignment (+=) to x_i ---
+    LDR X10, =x_i_2
+    LDR W11, [X10]
+    MOV W12, #5
+    ADD W11, W11, W12
+    STR W11, [X10]
+    // --- End of compound assignment (+=) to x_i ---
+
     // --- Start of println call ---
-    LDR X9, =i1_2
+    LDR X9, =x_i_2
     LDRSW X10, [X9]
-    NEG X10, X10
     LDR X0, =str0
     MOV X1, X10
-    BL printf
-    // --- End of println call ---
-    // --- Start of println call ---
-    LDR X9, =f1_2
-    LDR D8, [X9]
-    FNEG D8, D8
-    LDR X0, =str1
-    FMOV D0, D8
     BL printf
     // --- End of println call ---
 .Lmain_epilogue:

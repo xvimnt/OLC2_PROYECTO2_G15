@@ -464,83 +464,105 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 		return nil
 	}
 
-	// Evaluate the right side (RHS) and generate code to store the value.
-	// This is a simplified evaluation that handles literals directly.
-	// A more robust implementation would have expression visitors return results in registers.
-	switch rhs := node.Right.(type) {
-	case *ast.BoolLiteral:
-		if varType != TypeBool {
-			fmt.Fprintf(os.Stderr, "Type mismatch in assignment to %s. Expected Bool.\n", varName)
-			return nil
-		}
-		val := "0"
-		if rhs.Value {
-			val = "1"
-		}
-		t.addAsm("    // --- Start of assignment to %s ---", varName)
-		t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
-		t.addAsm("    MOV W11, #%s", val)        // Load immediate value (0 or 1)
-		t.addAsm("    STRB W11, [X10]")         // Store byte value
-		t.addAsm("    // --- End of assignment to %s ---", varName)
-		t.addAsm("") // Add a blank line for readability after assignment
+	// Handle different assignment operators
+	switch node.Operator {
+	case "=":
+		// Evaluate the right side (RHS) and generate code to store the value.
+		// This is a simplified evaluation that handles literals directly.
+		// A more robust implementation would have expression visitors return results in registers.
+		switch rhs := node.Right.(type) {
+		case *ast.BoolLiteral:
+			if varType != TypeBool {
+				fmt.Fprintf(os.Stderr, "Type mismatch in assignment to %s. Expected Bool.\n", varName)
+				return nil
+			}
+			val := "0"
+			if rhs.Value {
+				val = "1"
+			}
+			t.addAsm("    // --- Start of assignment to %s ---", varName)
+			t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
+			t.addAsm("    MOV W11, #%s", val)        // Load immediate value (0 or 1)
+			t.addAsm("    STRB W11, [X10]")         // Store byte value
+			t.addAsm("    // --- End of assignment to %s ---", varName)
+			t.addAsm("") // Add a blank line for readability after assignment
 
-	case *ast.IntegerLiteral:
-		if varType != TypeInt {
-			fmt.Fprintf(os.Stderr, "Type mismatch in assignment to %s. Expected Int.\n", varName)
-			return nil
-		}
-		t.addAsm("    // --- Start of assignment to %s ---", varName)
-		t.addAsm("    LDR X10, =%s", mangledName)      // Load address of the variable
-		t.addAsm("    MOV W11, #%s", rhs.Value)    // Load immediate integer value
-		t.addAsm("    STR W11, [X10]")                // Store word value
-		t.addAsm("    // --- End of assignment to %s ---", varName)
-		t.addAsm("") // Add a blank line for readability after assignment
+		case *ast.IntegerLiteral:
+			if varType != TypeInt {
+				fmt.Fprintf(os.Stderr, "Type mismatch in assignment to %s. Expected Int.\n", varName)
+				return nil
+			}
+			t.addAsm("    // --- Start of assignment to %s ---", varName)
+			t.addAsm("    LDR X10, =%s", mangledName)      // Load address of the variable
+			t.addAsm("    MOV W11, #%s", rhs.Value)    // Load immediate integer value
+			t.addAsm("    STR W11, [X10]")                // Store word value
+			t.addAsm("    // --- End of assignment to %s ---", varName)
+			t.addAsm("") // Add a blank line for readability after assignment
 
-	case *ast.IdentifierExpr:
-		rhsVarName := rhs.Name
-		rhsMangledName, rhsVarType, rhsExists := t.lookupSymbol(rhsVarName)
-		if !rhsExists {
-			fmt.Fprintf(os.Stderr, "Assignment from undeclared variable: %s\n", rhsVarName)
-			return nil
-		}
+		case *ast.IdentifierExpr:
+			rhsVarName := rhs.Name
+			rhsMangledName, rhsVarType, rhsExists := t.lookupSymbol(rhsVarName)
+			if !rhsExists {
+				fmt.Fprintf(os.Stderr, "Assignment from undeclared variable: %s\n", rhsVarName)
+				return nil
+			}
 
-		// Basic type check
-		if varType != rhsVarType {
-			fmt.Fprintf(os.Stderr, "Type mismatch in assignment to %s. Cannot assign value from %s.\n", varName, rhsVarName)
-			return nil
-		}
+			// Basic type check
+			if varType != rhsVarType {
+				fmt.Fprintf(os.Stderr, "Type mismatch in assignment to %s. Cannot assign value from %s.\n", varName, rhsVarName)
+				return nil
+			}
 
-		t.addAsm("    // --- Start of assignment to %s from %s ---", varName, rhsVarName)
-		switch varType {
-		case TypeInt:
-			t.addAsm("    LDR X9, =%s", rhsMangledName) // Load address of RHS
-			t.addAsm("    LDR W11, [X9]")               // Load value from RHS
-			t.addAsm("    LDR X10, =%s", mangledName)    // Load address of LHS
-			t.addAsm("    STR W11, [X10]")               // Store value to LHS
-		case TypeBool:
-			t.addAsm("    LDR X9, =%s", rhsMangledName) // Load address of RHS
-			t.addAsm("    LDRB W11, [X9]")              // Load byte from RHS
-			t.addAsm("    LDR X10, =%s", mangledName)   // Load address of LHS
-			t.addAsm("    STRB W11, [X10]")             // Store byte to LHS
+			t.addAsm("    // --- Start of assignment to %s from %s ---", varName, rhsVarName)
+			switch varType {
+			case TypeInt:
+				t.addAsm("    LDR X9, =%s", rhsMangledName) // Load address of RHS
+				t.addAsm("    LDR W11, [X9]")               // Load value from RHS
+				t.addAsm("    LDR X10, =%s", mangledName)    // Load address of LHS
+				t.addAsm("    STR W11, [X10]")               // Store value to LHS
+			case TypeBool:
+				t.addAsm("    LDR X9, =%s", rhsMangledName) // Load address of RHS
+				t.addAsm("    LDRB W11, [X9]")              // Load byte from RHS
+				t.addAsm("    LDR X10, =%s", mangledName)   // Load address of LHS
+				t.addAsm("    STRB W11, [X10]")             // Store byte to LHS
+			default:
+				fmt.Fprintf(os.Stderr, "Unsupported type for variable-to-variable assignment: %s\n", varType)
+				return nil
+			}
+			t.addAsm("    // --- End of assignment to %s from %s ---", varName, rhsVarName)
+			t.addAsm("")
+
+		// TODO: Add cases for other literal types like FloatLiteral, StringLiteral.
+		// TODO: Add cases for BinaryExpr (assignment from an arithmetic operation).
+
 		default:
-			fmt.Fprintf(os.Stderr, "Unsupported type for variable-to-variable assignment: %s\n", varType)
+			fmt.Fprintf(os.Stderr, "Unsupported R-value in assignment: %T\n", node.Right)
+			if node.Right != nil {
+				node.Right.Accept(t)
+			}
+		}
+	case "+=":
+		if varType != TypeInt {
+			fmt.Fprintf(os.Stderr, "Type mismatch in compound assignment to %s. Expected Int.\n", varName)
 			return nil
 		}
-		t.addAsm("    // --- End of assignment to %s from %s ---", varName, rhsVarName)
-		t.addAsm("")
-
-	// TODO: Add cases for other literal types like FloatLiteral, StringLiteral.
-	// TODO: Add cases for BinaryExpr (assignment from an arithmetic operation).
-
-	default:
-		fmt.Fprintf(os.Stderr, "Unsupported R-value in assignment: %T\n", node.Right)
-		if node.Right != nil {
-			node.Right.Accept(t)
+		// For now, assume RHS is an IntegerLiteral for simplicity
+		if rhs, ok := node.Right.(*ast.IntegerLiteral); ok {
+			t.addAsm("    // --- Start of compound assignment (+=) to %s ---", varName)
+			t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
+			t.addAsm("    LDR W11, [X10]")           // Load current value of var
+			t.addAsm("    MOV W12, #%s", rhs.Value) // Load immediate integer value from RHS
+			t.addAsm("    ADD W11, W11, W12")        // Perform addition
+			t.addAsm("    STR W11, [X10]")           // Store result back
+			t.addAsm("    // --- End of compound assignment (+=) to %s ---", varName)
+			t.addAsm("")
+		} else {
+			// TODO: Handle other RHS types like IdentifierExpr
+			fmt.Fprintf(os.Stderr, "Unsupported R-value in compound assignment: %T\n", node.Right)
 		}
+	default:
+		fmt.Fprintf(os.Stderr, "Unsupported assignment operator: %s\n", node.Operator)
 	}
-
-	// We don't visit node.Left because we've already processed it to get the varName.
-	// Visiting it would be redundant or incorrect if it's not designed to be visited in this context.
 
 	return nil
 }

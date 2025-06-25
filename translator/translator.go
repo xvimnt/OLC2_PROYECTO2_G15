@@ -3,7 +3,6 @@ package translator
 import (
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/xvimnt/OLC2_PROYECTO2_G15/ast"
@@ -59,7 +58,18 @@ type Translator struct {
 	hasStringFormatStr bool              // Tracks if the string format string has been added
 	currentFuncDef     *ast.FunctionDecl // Keep track of the current function being defined
 	DebugMode          bool
+
+	// Register allocation
+	intRegs   []bool // Availability of general-purpose integer registers (X9-X15)
+	floatRegs []bool // Availability of general-purpose float registers (D8-D15)
 }
+
+const (
+	numIntRegs    = 7 // X9-X15
+	intRegStart   = 9
+	numFloatRegs  = 8 // D8-D15
+	floatRegStart = 8
+)
 
 // NewTranslator creates a new Translator instance.
 func NewTranslator(debugMode bool) *Translator {
@@ -77,8 +87,65 @@ func NewTranslator(debugMode bool) *Translator {
 		hasStringFormatStr: false,
 		currentFuncDef:     nil,
 		DebugMode:          debugMode,
+		intRegs:            make([]bool, numIntRegs),
+		floatRegs:          make([]bool, numFloatRegs),
 	}
+
+	// Initialize all registers as available
+	for i := 0; i < numIntRegs; i++ {
+		t.intRegs[i] = true
+	}
+	for i := 0; i < numFloatRegs; i++ {
+		t.floatRegs[i] = true
+	}
+
 	return t
+}
+
+// --- Register Management ---
+
+// acquireIntRegister finds and returns an available integer register.
+func (t *Translator) acquireIntRegister() int {
+	for i, available := range t.intRegs {
+		if available {
+			t.intRegs[i] = false
+			return i + intRegStart
+		}
+	}
+	panic("No more integer registers available!") // Or handle more gracefully
+}
+
+// releaseIntRegister marks an integer register as available.
+func (t *Translator) releaseIntRegister(reg int) {
+	if reg >= intRegStart && reg < intRegStart+numIntRegs {
+		t.intRegs[reg-intRegStart] = true
+	}
+}
+
+// acquireFloatRegister finds and returns an available float register.
+func (t *Translator) acquireFloatRegister() int {
+	for i, available := range t.floatRegs {
+		if available {
+			t.floatRegs[i] = false
+			return i + floatRegStart
+		}
+	}
+	panic("No more float registers available!")
+}
+
+// releaseFloatRegister marks a float register as available.
+func (t *Translator) releaseFloatRegister(reg int) {
+	if reg >= floatRegStart && reg < floatRegStart+numFloatRegs {
+		t.floatRegs[reg-floatRegStart] = true
+	}
+}
+
+// addStringData adds a string to the .data section and returns its label.
+func (t *Translator) addFloatData(floatStr string) string {
+	label := fmt.Sprintf("F%d", t.stringCounter)
+	t.stringCounter++
+	t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double %s", label, floatStr))
+	return label
 }
 
 // addStringData adds a string to the .data section and returns its label.
@@ -592,25 +659,76 @@ func (t *Translator) VisitIncDecStmt(node *ast.IncDecStmt) interface{} {
 	return nil
 }
 
+// ExpressionResult holds the result of an expression evaluation.
+// It contains the register where the result is stored and its type.
+type ExpressionResult struct {
+	Reg  int
+	Type VarType
+}
+
 // Expressions
 
 func (t *Translator) VisitTypeOfExpr(node *ast.TypeOfExpr) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting TypeOfExpr")
 	}
-	// TODO: Implement TypeOfExpr translation (usually for type checking or metadata)
-	// Example: node.Expression.Accept(t)
+	// TODO: Implement TypeOfExpr translation
 	return nil
 }
 
 func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting BinaryExpr")
+		fmt.Printf("Translator.Visiting BinaryExpr: %s\n", node.Operator)
 	}
-	// TODO: Implement BinaryExpr translation (e.g., arithmetic, logical ops)
-	node.Left.Accept(t)
-	node.Right.Accept(t)
-	return nil
+
+	leftResult := node.Left.Accept(t).(ExpressionResult)
+	rightResult := node.Right.Accept(t).(ExpressionResult)
+
+	// Handle type promotion: Int -> Float
+	if leftResult.Type != rightResult.Type {
+		if leftResult.Type == TypeInt && rightResult.Type == TypeFloat {
+			// Promote left operand (int) to float
+			t.addAsm("    // Promoting left operand from INT to FLOAT")
+			promotedFloatReg := t.acquireFloatRegister() // Get a new float register for the converted value
+			t.addAsm("    SCVTF D%d, X%d", promotedFloatReg, leftResult.Reg)
+			t.releaseIntRegister(leftResult.Reg) // Release the original int register
+			leftResult.Reg = promotedFloatReg      // Update leftResult to point to the new float register
+			leftResult.Type = TypeFloat
+		} else if leftResult.Type == TypeFloat && rightResult.Type == TypeInt {
+			// Promote right operand (int) to float
+			t.addAsm("    // Promoting right operand from INT to FLOAT")
+			promotedFloatReg := t.acquireFloatRegister()
+			t.addAsm("    SCVTF D%d, X%d", promotedFloatReg, rightResult.Reg)
+			t.releaseIntRegister(rightResult.Reg)
+			rightResult.Reg = promotedFloatReg
+			rightResult.Type = TypeFloat
+		} else {
+			panic(fmt.Sprintf("Unsupported type mismatch in binary expression: %s and %s", leftResult.Type, rightResult.Type))
+		}
+	}
+
+	switch leftResult.Type {
+	case TypeInt:
+		switch node.Operator {
+		case "+":
+			t.addAsm("    ADD X%d, X%d, X%d", leftResult.Reg, leftResult.Reg, rightResult.Reg)
+		default:
+			panic(fmt.Sprintf("Unsupported integer operator: %s", node.Operator))
+		}
+		t.releaseIntRegister(rightResult.Reg)
+	case TypeFloat:
+		switch node.Operator {
+		case "+":
+			t.addAsm("    FADD D%d, D%d, D%d", leftResult.Reg, leftResult.Reg, rightResult.Reg)
+		default:
+			panic(fmt.Sprintf("Unsupported float operator: %s", node.Operator))
+		}
+		t.releaseFloatRegister(rightResult.Reg)
+	default:
+		panic(fmt.Sprintf("Unsupported type for binary operation: %s", leftResult.Type))
+	}
+
+	return leftResult // The result is in the left register
 }
 
 func (t *Translator) VisitUnaryExpr(node *ast.UnaryExpr) interface{} {
@@ -618,9 +736,6 @@ func (t *Translator) VisitUnaryExpr(node *ast.UnaryExpr) interface{} {
 		fmt.Println("Translator.Visiting UnaryExpr")
 	}
 	// TODO: Implement UnaryExpr translation
-	if node.Right != nil {
-		node.Right.Accept(t)
-	}
 	return nil
 }
 
@@ -628,21 +743,42 @@ func (t *Translator) VisitParenExpr(node *ast.ParenExpr) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting ParenExpr")
 	}
-	// TODO: Implement ParenExpr translation
-	node.Expression.Accept(t)
-	return nil
+	// Just evaluate the inner expression and return its result
+	return node.Expression.Accept(t)
 }
 
 func (t *Translator) VisitIdentifierExpr(node *ast.IdentifierExpr) interface{} {
 	if t.DebugMode {
 		fmt.Printf("Translator.Visiting IdentifierExpr: %s\n", node.Name)
 	}
-	// For an identifier, we might need to load its value from memory or a register.
-	// If it's a function name (like in CallExpr), the CallExpr handler uses the name.
-	// If it's a variable, we'd generate code to load it.
-	// For now, just return its name. This might be used by parent nodes.
-	// TODO: Implement variable loading, etc.
-	return node.Name
+
+	mangledName, varType, exists := t.lookupSymbol(node.Name)
+	if !exists {
+		panic(fmt.Sprintf("Undefined variable: %s", node.Name))
+	}
+
+	// Use a temporary register to load the address of the variable from the data section.
+	// This is more robust and avoids PC-relative range issues.
+	addrReg := t.acquireIntRegister()
+	t.addAsm("    LDR X%d, =%s", addrReg, mangledName)
+
+	switch varType {
+	case TypeInt:
+		valReg := t.acquireIntRegister()
+		// Load 32-bit signed word from the address in addrReg.
+		t.addAsm("    LDRSW X%d, [X%d]", valReg, addrReg)
+		t.releaseIntRegister(addrReg) // Free the address register.
+		return ExpressionResult{Reg: valReg, Type: TypeInt}
+	case TypeFloat:
+		valReg := t.acquireFloatRegister()
+		// Load 64-bit double from the address in addrReg.
+		t.addAsm("    LDR D%d, [X%d]", valReg, addrReg)
+		t.releaseIntRegister(addrReg) // Free the address register.
+		return ExpressionResult{Reg: valReg, Type: TypeFloat}
+	default:
+		t.releaseIntRegister(addrReg) // Release register even on panic
+		panic(fmt.Sprintf("Loading for type %s not implemented", varType))
+	}
 }
 
 func (t *Translator) VisitTypeConversionExpr(node *ast.TypeConversionExpr) interface{} {
@@ -650,12 +786,6 @@ func (t *Translator) VisitTypeConversionExpr(node *ast.TypeConversionExpr) inter
 		fmt.Println("Translator.Visiting TypeConversionExpr")
 	}
 	// TODO: Implement TypeConversionExpr translation
-	if node.Expression != nil {
-		node.Expression.Accept(t)
-	}
-	if node.TargetType != nil {
-		node.TargetType.Accept(t)
-	}
 	return nil
 }
 
@@ -664,12 +794,6 @@ func (t *Translator) VisitCompositeLiteralExpr(node *ast.CompositeLiteralExpr) i
 		fmt.Println("Translator.Visiting CompositeLiteralExpr")
 	}
 	// TODO: Implement CompositeLiteralExpr translation
-	if node.Type != nil {
-		node.Type.Accept(t)
-	}
-	for _, el := range node.Elements {
-		el.Accept(t)
-	}
 	return nil
 }
 
@@ -678,10 +802,6 @@ func (t *Translator) VisitCompositeElement(node *ast.CompositeElement) interface
 		fmt.Println("Translator.Visiting CompositeElement")
 	}
 	// TODO: Implement CompositeElement translation
-	if node.Key != nil {
-		node.Key.Accept(t)
-	}
-	node.Value.Accept(t)
 	return nil
 }
 
@@ -690,8 +810,6 @@ func (t *Translator) VisitIndexAccessExpr(node *ast.IndexAccessExpr) interface{}
 		fmt.Println("Translator.Visiting IndexAccessExpr")
 	}
 	// TODO: Implement IndexAccessExpr translation
-	node.Receiver.Accept(t)
-	node.Index.Accept(t)
 	return nil
 }
 
@@ -700,178 +818,112 @@ func (t *Translator) VisitFieldAccessExpr(node *ast.FieldAccessExpr) interface{}
 		fmt.Println("Translator.Visiting FieldAccessExpr")
 	}
 	// TODO: Implement FieldAccessExpr translation
-	node.Receiver.Accept(t)
-	// node.FieldName is an IdentifierExpr, usually handled by its name string
 	return nil
 }
 
 func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 	if t.DebugMode {
-		if ident, ok := node.Function.(*ast.IdentifierExpr); ok {
+		fmt.Println("Translator.Visiting CallExpr")
+	}
+
+	if ident, ok := node.Function.(*ast.IdentifierExpr); ok && ident.Name == "println" {
+		if t.DebugMode {
 			fmt.Printf("Translator.VisitCallExpr: Visiting call to identifier: '%s'\n", ident.Name)
-		} else {
-			fmt.Printf("Translator.VisitCallExpr: Visiting call to expression of type %T\n", node.Function)
 		}
+		t.needsPrintf = true
+		t.addAsm("    // --- Start of println call ---")
+		t.handlePrintln(node.Arguments)
+		t.addAsm("    // --- End of println call ---")
+		return nil
 	}
 
-	if ident, ok := node.Function.(*ast.IdentifierExpr); ok {
-		// Special handling for println
-		if ident.Name == "println" {
-			t.handlePrintln(node.Arguments)
-		} else {
-			// Generic function call handling
-			t.addAsm("    BL %s", ident.Name)
+	if t.DebugMode {
+		if ident, ok := node.Function.(*ast.IdentifierExpr); ok {
+			fmt.Printf("Translator.VisitCallExpr: Unhandled call to identifier: '%s'\n", ident.Name)
 		}
-	} else {
-		fmt.Fprintf(os.Stderr, "Translator Error: Non-identifier function calls not yet supported\n")
 	}
-
 	return nil
 }
 
-// handlePrintlnStringLiteral processes a string literal within a 'println' call,
-// handling string interpolation for variables.
 func (t *Translator) handlePrintln(args []ast.Expression) {
-	t.needsPrintf = true
-	var formatParts []string
+	var formatString strings.Builder
+	var evaluatedArgs []ExpressionResult
 
-	type printArg struct {
-		mangledName string
-		varType     VarType
-	}
-	var printArgs []printArg
-
-	for i, arg := range args {
-		if i > 0 {
-			formatParts = append(formatParts, " ")
-		}
-
-		switch v := arg.(type) {
-		case *ast.StringLiteral:
-			rawVal := v.Value
-			if len(rawVal) >= 2 && rawVal[0] == '"' && rawVal[len(rawVal)-1] == '"' {
-				rawVal = rawVal[1 : len(rawVal)-1]
-			}
-
-			re := regexp.MustCompile(`\$([a-zA-Z_]\w*)`)
-			matches := re.FindAllStringSubmatchIndex(rawVal, -1)
-			lastIndex := 0
-			for _, match := range matches {
-				formatParts = append(formatParts, rawVal[lastIndex:match[0]])
-				varName := rawVal[match[2]:match[3]]
-				mangledName, varType, exists := t.lookupSymbol(varName)
-				if !exists {
-					fmt.Fprintf(os.Stderr, "Error: Use of undeclared variable '%s' in println.\n", varName)
-					formatParts = append(formatParts, "[UNDECLARED]")
-					continue
-				}
-
-				switch varType {
-				case TypeFloat:
-					formatParts = append(formatParts, "%f")
-				case TypeString, TypeBool:
-					formatParts = append(formatParts, "%s")
-				default:
-					formatParts = append(formatParts, "%d")
-				}
-				printArgs = append(printArgs, printArg{mangledName: mangledName, varType: varType})
-				lastIndex = match[1]
-			}
-			formatParts = append(formatParts, rawVal[lastIndex:])
-
-		case *ast.IdentifierExpr:
-			varName := v.Name
-			mangledName, varType, exists := t.lookupSymbol(varName)
-			if !exists {
-				fmt.Fprintf(os.Stderr, "Error: Use of undeclared variable '%s' in println.\n", varName)
-				formatParts = append(formatParts, "[UNDECLARED]")
-				continue
-			}
-
-			switch varType {
+	// 1. Build format string and evaluate expressions
+	for _, arg := range args {
+		if strLit, ok := arg.(*ast.StringLiteral); ok {
+			formatString.WriteString(strLit.Value)
+		} else {
+			result := arg.Accept(t).(ExpressionResult)
+			evaluatedArgs = append(evaluatedArgs, result)
+			switch result.Type {
+			case TypeInt:
+				formatString.WriteString("%d")
 			case TypeFloat:
-				formatParts = append(formatParts, "%f")
-			case TypeString, TypeBool:
-				formatParts = append(formatParts, "%s")
+				formatString.WriteString("%f")
+			case TypeString:
+				formatString.WriteString("%s")
 			default:
-				formatParts = append(formatParts, "%d")
+				//panic(fmt.Sprintf("Unsupported type for println: %s", result.Type))
 			}
-			printArgs = append(printArgs, printArg{mangledName: mangledName, varType: varType})
-
-		default:
-			formatParts = append(formatParts, "[?]")
 		}
 	}
+	formatString.WriteString("\n")
 
-	formatParts = append(formatParts, "\n")
-	formatString := strings.Join(formatParts, "")
-	formatLabel := t.addStringData(formatString)
+	// 2. Add the format string to the data section
+	formatLabel := t.addStringData(formatString.String())
 
-	t.addAsm("    // --- Start of println call ---")
+	// 3. Load arguments into registers for printf
+	// Load format string address into X0
 	t.addAsm("    LDR X0, =%s", formatLabel)
 
-	intArgCount := 1
+	intArgCount := 0
 	floatArgCount := 0
 
-	for _, arg := range printArgs {
-		switch arg.varType {
+	for _, arg := range evaluatedArgs {
+		switch arg.Type {
+		case TypeInt:
+			if intArgCount < 7 { // X1-X7 for integer/pointer arguments
+				t.addAsm("    MOV X%d, X%d", intArgCount+1, arg.Reg)
+				t.releaseIntRegister(arg.Reg)
+				intArgCount++
+			}
 		case TypeFloat:
-			if floatArgCount < 8 {
-				t.addAsm("    LDR X9, =%s", arg.mangledName)
-				t.addAsm("    LDR D%d, [X9]", floatArgCount)
+			if floatArgCount < 8 { // D0-D7 for float arguments
+				t.addAsm("    FMOV D%d, D%d", floatArgCount, arg.Reg) // Note: printf varargs start D0
+				t.releaseFloatRegister(arg.Reg)
 				floatArgCount++
 			}
-		case TypeString:
-			if intArgCount < 8 {
-				t.addAsm("    LDR X%d, =%s", intArgCount, arg.mangledName)
-				t.addAsm("    LDR X%d, [X%d]", intArgCount, intArgCount)
-				intArgCount++
-			}
-		case TypeBool:
-			if intArgCount < 8 {
-				trueLabel := t.addStringData("true")
-				falseLabel := t.addStringData("false")
-				argReg := fmt.Sprintf("X%d", intArgCount)
-				valReg := "W9"
-				trueAddrReg := "X10"
-				falseAddrReg := "X11"
-
-				t.addAsm("    LDR %s, =%s", trueAddrReg, trueLabel)
-				t.addAsm("    LDR %s, =%s", falseAddrReg, falseLabel)
-				t.addAsm("    LDR X12, =%s", arg.mangledName)
-				t.addAsm("    LDRB %s, [X12]", valReg)
-				t.addAsm("    CMP %s, #0", valReg)
-				t.addAsm("    CSEL %s, %s, %s, EQ", argReg, falseAddrReg, trueAddrReg)
-				intArgCount++
-			}
-		default: // TypeInt, TypeUnknown
-			if intArgCount < 8 {
-				t.addAsm("    LDR X9, =%s", arg.mangledName)
-				t.addAsm("    LDR W%d, [X9]", intArgCount)
+		case TypeString: // Assuming string address is in an X register
+			if intArgCount < 7 {
+				t.addAsm("    MOV X%d, X%d", intArgCount+1, arg.Reg)
+				t.releaseIntRegister(arg.Reg)
 				intArgCount++
 			}
 		}
 	}
 
+	// 4. Call printf
 	t.addAsm("    BL printf")
-	t.addAsm("    // --- End of println call ---")
-	t.addAsm("")
 }
 
 func (t *Translator) VisitIntegerLiteral(node *ast.IntegerLiteral) interface{} {
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting IntegerLiteral")
+		fmt.Printf("Translator.Visiting IntegerLiteral: %s\n", node.Value)
 	}
-	// TODO: Implement IntegerLiteral translation (e.g., load immediate value)
-	return nil
+	reg := t.acquireIntRegister()
+	t.addAsm("    MOV X%d, #%s", reg, node.Value)
+	return ExpressionResult{Reg: reg, Type: TypeInt}
 }
 
 func (t *Translator) VisitFloatLiteral(node *ast.FloatLiteral) interface{} {
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting FloatLiteral")
+		fmt.Printf("Translator.Visiting FloatLiteral: %s\n", node.Value)
 	}
-	// TODO: Implement FloatLiteral translation
-	return nil
+	label := t.addFloatData(node.Value)
+	reg := t.acquireFloatRegister()
+	t.addAsm("    LDR D%d, %s", reg, label)
+	return ExpressionResult{Reg: reg, Type: TypeFloat}
 }
 
 func (t *Translator) VisitStringLiteral(node *ast.StringLiteral) interface{} {

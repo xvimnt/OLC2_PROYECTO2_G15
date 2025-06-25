@@ -15,7 +15,9 @@ type VarType int
 const (
 	TypeUnknown VarType = iota
 	TypeInt
+	TypeFloat
 	TypeString
+	TypeBool
 )
 
 // Translator translates AST nodes into assembly code.
@@ -26,6 +28,7 @@ type Translator struct {
 	stringCounter      int               // For generating unique string labels
 	needsPrintf        bool              // Tracks if printf is used (for .extern printf)
 	hasIntFormatStr    bool              // Tracks if the integer format string has been added
+	hasFloatFormatStr  bool              // Tracks if the float format string has been added
 	hasStringFormatStr bool              // Tracks if the string format string has been added
 	currentFuncDef     *ast.FunctionDecl // Keep track of the current function being defined
 	DebugMode          bool
@@ -40,6 +43,7 @@ func NewTranslator(debugMode bool) *Translator {
 		stringCounter:      0,
 		needsPrintf:        false,
 		hasIntFormatStr:    false,
+		hasFloatFormatStr:  false,
 		hasStringFormatStr: false,
 		currentFuncDef:     nil,
 		DebugMode:          debugMode,
@@ -211,14 +215,45 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 			t.symbolTable[varName] = TypeUnknown
 		}
 	} else {
-		// Uninitialized global variable, default to 0 and unknown type
-		t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
-		t.symbolTable[varName] = TypeUnknown
+		// Uninitialized variable, assign default value based on type
+		if node.ExplicitType != nil {
+			if typeName, ok := node.ExplicitType.(*ast.TypeName); ok {
+				switch typeName.Name {
+				case "int":
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
+					t.symbolTable[varName] = TypeInt
+				case "float64":
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double 0.0", varName))
+					t.symbolTable[varName] = TypeFloat
+				case "string":
+					strLabel := t.addStringData("")
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad %s", varName, strLabel))
+					t.symbolTable[varName] = TypeString
+				case "bool":
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .byte 0", varName)) // 0 for false
+					t.symbolTable[varName] = TypeBool
+				default:
+					// Default for unhandled explicit types
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
+					t.symbolTable[varName] = TypeUnknown
+				}
+			} else {
+				// Type is not a simple TypeName, default for now
+				t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
+				t.symbolTable[varName] = TypeUnknown
+			}
+		} else {
+			// Type not specified (e.g. from := which requires an initializer), so this case is for declarations without initializer.
+			// Default to integer 0.
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
+			t.symbolTable[varName] = TypeUnknown
+		}
 	}
 
 	return nil
 }
 
+// ...
 // Statements
 func (t *Translator) VisitBlockStmt(node *ast.BlockStmt) interface{} {
 	if t.DebugMode {
@@ -490,46 +525,9 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 	}
 
 	if ident, ok := node.Function.(*ast.IdentifierExpr); ok {
-		// Special handling for println (the '!' was a grammar detail)
+		// Special handling for println
 		if ident.Name == "println" {
-			for _, arg := range node.Arguments {
-				switch v := arg.(type) {
-				case *ast.StringLiteral:
-					t.handlePrintlnStringLiteral(v)
-				case *ast.IdentifierExpr:
-					// For variables, we use printf and the symbol table to determine the type.
-					varName := v.Name
-					varType, ok := t.symbolTable[varName]
-					if !ok {
-						fmt.Fprintf(os.Stderr, "Translator Error: undefined variable '%s'\n", varName)
-						return nil
-					}
-
-					t.needsPrintf = true
-					switch varType {
-					case TypeString:
-						if !t.hasStringFormatStr {
-							t.dataSection = append(t.dataSection, "str_fmt: .asciz \"%s\\n\"")
-							t.hasStringFormatStr = true
-						}
-						t.addAsm("    LDR X0, =str_fmt")
-						t.addAsm("    LDR X1, =%s", varName) // Load address of the pointer
-						t.addAsm("    LDR X1, [X1]")        // Load the pointer (address of string) into X1 (2nd arg)
-						t.addAsm("    BL printf")
-					case TypeInt:
-						if !t.hasIntFormatStr {
-							t.dataSection = append(t.dataSection, "int_fmt: .asciz \"%d\\n\"")
-							t.hasIntFormatStr = true
-						}
-						t.addAsm("    LDR X0, =int_fmt")
-						t.addAsm("    LDR X1, =%s", varName)
-						t.addAsm("    LDR W1, [X1]")
-						t.addAsm("    BL printf")
-					}
-				default:
-					fmt.Fprintf(os.Stderr, "Warning: println for argument type %T not yet supported.\n", v)
-				}
-			}
+			t.handlePrintln(node.Arguments)
 		} else {
 			// Generic function call handling
 			t.addAsm("    BL %s", ident.Name)
@@ -543,104 +541,104 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 
 // handlePrintlnStringLiteral processes a string literal within a 'println' call,
 // handling string interpolation for variables.
-func (t *Translator) handlePrintlnStringLiteral(node *ast.StringLiteral) {
-	// Raw string value, without quotes.
-	rawValue := node.Value
-	if len(rawValue) >= 2 && rawValue[0] == '"' && rawValue[len(rawValue)-1] == '"' {
-		rawValue = rawValue[1 : len(rawValue)-1]
-	}
-
-	// Regex to find variables like $var
-	re := regexp.MustCompile(`\$([a-zA-Z_]\w*)`)
-	matches := re.FindAllStringSubmatchIndex(rawValue, -1)
-
-	if len(matches) == 0 {
-		// No variables found, use the simple 'write' syscall for efficiency.
-		strLabel := t.addStringData(rawValue + "\n")
-		strLen := len(rawValue) + 1
-		t.addAsm("    // Syscall: write(fd=1, buf, count)")
-		t.addAsm("    MOV X8, #64")      // write syscall number
-		t.addAsm("    MOV X0, #1")       // fd: stdout
-		t.addAsm("    LDR X1, =%s", strLabel) // buf: address of the string
-		t.addAsm("    MOV X2, #%d", strLen) // count: length of the string
-		t.addAsm("    SVC #0")           // trigger syscall
-		return
-	}
-
-	// Variables found, we need to use printf.
+func (t *Translator) handlePrintln(args []ast.Expression) {
 	t.needsPrintf = true
-	var formatString strings.Builder
+	var formatParts []string
 	var varNames []string
-	lastIndex := 0
 
-	for _, match := range matches {
-		// Append the literal part before the variable.
-		formatString.WriteString(rawValue[lastIndex:match[0]])
-
-		// Get the variable name from the capture group.
-		varName := rawValue[match[2]:match[3]]
-		varNames = append(varNames, varName)
-
-		// Look up variable type and add the correct format specifier.
-		varType, ok := t.symbolTable[varName]
-		if !ok {
-			fmt.Fprintf(os.Stderr, "Translator Error: undefined variable '%s' in string literal\n", varName)
-			// Add a placeholder to avoid breaking the format string structure.
-			formatString.WriteString("<undef_var>")
-		} else {
-			switch varType {
-			case TypeInt:
-				formatString.WriteString("%d")
-			case TypeString:
-				formatString.WriteString("%s")
-			default:
-				// Handle other types or default to a generic representation.
-				formatString.WriteString("<unsupported_type>")
+	// First pass: build format string and collect variable names
+	for _, arg := range args {
+		switch v := arg.(type) {
+		case *ast.StringLiteral:
+			rawVal := v.Value
+			re := regexp.MustCompile(`\$([a-zA-Z_]\w*)`)
+			matches := re.FindAllStringSubmatchIndex(rawVal, -1)
+			lastIndex := 0
+			for _, match := range matches {
+				formatParts = append(formatParts, rawVal[lastIndex:match[0]])
+				varName := rawVal[match[2]:match[3]]
+				varType := t.symbolTable[varName]
+				switch varType {
+				case TypeFloat:
+					formatParts = append(formatParts, "%f")
+				case TypeBool:
+					formatParts = append(formatParts, "%s") // Bools will be printed as 'true'/'false' strings
+				case TypeString:
+					formatParts = append(formatParts, "%s")
+				default: // Int, Unknown
+					formatParts = append(formatParts, "%d")
+				}
+				varNames = append(varNames, varName)
+				lastIndex = match[1]
 			}
+			formatParts = append(formatParts, rawVal[lastIndex:])
+		case *ast.IdentifierExpr:
+			varType := t.symbolTable[v.Name]
+			switch varType {
+			case TypeFloat:
+				formatParts = append(formatParts, "%f")
+			case TypeBool:
+				formatParts = append(formatParts, "%s")
+			case TypeString:
+				formatParts = append(formatParts, "%s")
+			default: // Int, Unknown
+				formatParts = append(formatParts, "%d")
+			}
+			varNames = append(varNames, v.Name)
 		}
-		lastIndex = match[1]
 	}
-	// Append the rest of the string after the last variable.
-	formatString.WriteString(rawValue[lastIndex:])
-	formatString.WriteString("\n") // println adds a newline.
+	formatString := strings.Join(formatParts, "") + "\n"
+	formatLabel := t.addStringData(formatString)
 
-	// Add the final format string to the .data section.
-	formatLabel := t.addStringData(formatString.String())
-
-	// Load format string address into X0 (the first argument for printf).
+	t.addAsm("    // Println call")
 	t.addAsm("    LDR X0, =%s", formatLabel)
 
-	// Load variable values/addresses into registers X1, X2, ...
-	for i, varName := range varNames {
-		if i >= 7 { // printf in ARM64 takes first 8 args in X0-X7. X0 is format string.
-			fmt.Fprintf(os.Stderr, "Warning: Too many arguments for printf in string interpolation. Only the first 7 variables are supported.\n")
-			break
-		}
+	// Second pass: load arguments into registers
+	// ARM64 calling convention: general-purpose args in X1-X7, float args in D0-D7
+	// We will use X1 onwards for non-float and D0 onwards for floats.
+	// Note: A mix of many float/int args might exceed simple register logic.
+	intArgCount := 1
+	floatArgCount := 0
 
-		varType, ok := t.symbolTable[varName]
-		if !ok {
-			// If variable was undefined, we can't load it. We need to pass a dummy value.
-			// For simplicity, we'll load 0. The format string will show the error.
-			t.addAsm("    MOV X%d, #0", i+1)
-			continue
-		}
-
-		regNum := i + 1
-		reg := fmt.Sprintf("X%d", regNum)
-
+	for _, varName := range varNames {
+		varType := t.symbolTable[varName]
 		switch varType {
-		case TypeInt:
-			// For integers, load the value.
-			t.addAsm("    LDR %s, =%s", reg, varName) // Load address of the global variable.
-			t.addAsm("    LDR W%d, [%s]", regNum, reg) // Load the 32-bit word value from the address.
+		case TypeFloat:
+			if floatArgCount < 8 {
+				t.addAsm("    LDR X9, =%s", varName)      // Load address of float var into temp reg X9
+				t.addAsm("    LDR D%d, [X9]", floatArgCount) // Load float value from address into float arg reg
+				floatArgCount++
+			}
+		case TypeBool:
+			if intArgCount < 8 {
+				trueLabel := t.addStringData("true")
+				falseLabel := t.addStringData("false")
+				argReg := fmt.Sprintf("X%d", intArgCount)
+				valReg := fmt.Sprintf("W%d", intArgCount)
+				// Load the boolean value (1 byte) from its memory location
+				t.addAsm("    LDR X9, =%s", varName)       // Load address of bool var into temp reg X9
+				t.addAsm("    LDRB %s, [X9]", valReg)      // Load byte value from address
+				// Compare and select the correct string address
+				t.addAsm("    LDR %s, =%s", argReg, falseLabel) // Default to 'false'
+				t.addAsm("    CMP %s, #0", valReg)
+				t.addAsm("    LDRNE %s, =%s", argReg, trueLabel) // If not zero, load 'true'
+				intArgCount++
+			}
 		case TypeString:
-			// For strings, load the address of the string data.
-			t.addAsm("    LDR %s, =%s", reg, varName) // Load address of the pointer variable.
-			t.addAsm("    LDR %s, [%s]", reg, reg)    // Dereference the pointer to get the string address.
+			if intArgCount < 8 {
+				t.addAsm("    LDR X%d, =%s", intArgCount, varName) // Load address of the pointer
+				t.addAsm("    LDR X%d, [X%d]", intArgCount, intArgCount) // Dereference to get string address
+				intArgCount++
+			}
+		default: // Int, Unknown
+			if intArgCount < 8 {
+				t.addAsm("    LDR X9, =%s", varName)      // Load address of int var into temp reg X9
+				t.addAsm("    LDR W%d, [X9]", intArgCount) // Load integer value from address into arg reg
+				intArgCount++
+			}
 		}
 	}
 
-	// Call printf.
 	t.addAsm("    BL printf")
 }
 

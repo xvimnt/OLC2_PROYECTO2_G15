@@ -9,8 +9,8 @@ gui/arbol_cst.png
 parser/*
 
 # Ignore output files
-output.s
 output.exe
+output.s
 
 # Ignore test.v
 test.v

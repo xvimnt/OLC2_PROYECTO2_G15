@@ -3,7 +3,6 @@ package translator
 import (
 	"fmt"
 	"os" // Added for Fprintf to os.Stderr for errors
-	"strings"
 
 	"github.com/xvimnt/OLC2_PROYECTO2_G15/ast"
 )
@@ -31,14 +30,11 @@ func NewTranslator(debugMode bool) *Translator {
 }
 
 // addStringData adds a string to the .data section and returns its label.
-// It assumes strContent is the raw, C-style escaped string content.
+// It uses %q to handle proper quoting and escaping for the assembler.
 func (t *Translator) addStringData(strContent string) string {
 	label := fmt.Sprintf("str%d", t.stringCounter)
+	t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .asciz %q", label, strContent))
 	t.stringCounter++
-	// The strContent is the actual content, e.g., "Hello, world!" or "Hello\nWorld".
-	// The .asciz directive in GAS expects this content to be enclosed in double quotes.
-	// C-style escape sequences within strContent (like \n, \t, \", \\) are handled by the assembler.
-	t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .asciz \"%s\"", label, strContent))
 	return label
 }
 
@@ -468,42 +464,22 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 		if ident.Name == "println" {
 			// Implement println using the 'write' syscall for ARM64
 			if len(node.Arguments) != 1 {
-				fmt.Fprintf(os.Stderr, "Error: println called with %%d arguments, expected 1.\n", len(node.Arguments))
+				fmt.Fprintf(os.Stderr, "Error: println called with %d arguments, expected 1.\n", len(node.Arguments))
 				return nil
 			}
 
 			strLit, ok := node.Arguments[0].(*ast.StringLiteral)
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: println argument must be a string literal, but got %%T\n", node.Arguments[0])
+				fmt.Fprintf(os.Stderr, "Error: println argument must be a string literal, but got %T\n", node.Arguments[0])
 				return nil
 			}
 
-			// The AST node `strLit.Value` already contains the unquoted string content.
 			// For println, we append a newline character.
 			stringToPrint := strLit.Value + "\n"
 			length := len(stringToPrint)
 
-			// The assembler expects the string for .asciz to be C-escaped.
-			// We need to re-escape our raw string for the assembler.
-			var sb strings.Builder
-			for _, r := range stringToPrint {
-				switch r {
-				case '\n':
-					sb.WriteString("\\n")
-				case '\t':
-					sb.WriteString("\\t")
-				case '"':
-					sb.WriteString("\\\"")
-				case '\\':
-					sb.WriteString("\\\\")
-				default:
-					sb.WriteRune(r)
-				}
-			}
-			escapedString := sb.String()
-
-			// Add the final, escaped string to the .data section
-			label := t.addStringData(escapedString)
+			// Add the raw string to the .data section; addStringData will handle quoting/escaping.
+			label := t.addStringData(stringToPrint)
 
 			// Generate ARM64 syscall for 'write'
 			// syscall number for write is 64

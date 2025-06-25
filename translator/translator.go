@@ -58,6 +58,7 @@ type Translator struct {
 	hasStringFormatStr bool              // Tracks if the string format string has been added
 	currentFuncDef     *ast.FunctionDecl // Keep track of the current function being defined
 	DebugMode          bool
+	needsStringHelpers bool              // Tracks if string concatenation helpers are needed
 
 	// Register allocation
 	intRegs   []bool // Availability of general-purpose integer registers (X9-X15)
@@ -206,6 +207,12 @@ func (t *Translator) GetAssembly() []string {
 
 	// .text section
 	if len(t.asm) > 0 {
+		if t.needsStringHelpers {
+			finalAsm = append(finalAsm, ".extern malloc")
+			finalAsm = append(finalAsm, ".extern strlen")
+			finalAsm = append(finalAsm, ".extern strcpy")
+			finalAsm = append(finalAsm, ".extern strcat")
+		}
 		if t.needsPrintf {
 			finalAsm = append(finalAsm, ".extern printf")
 		}
@@ -684,51 +691,113 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 	leftResult := node.Left.Accept(t).(ExpressionResult)
 	rightResult := node.Right.Accept(t).(ExpressionResult)
 
+	// Handle string concatenation
+	if leftResult.Type == TypeString && rightResult.Type == TypeString {
+		if node.Operator == "+" {
+			t.needsStringHelpers = true
+			return t.concatenateStrings(leftResult, rightResult)
+		}
+		panic(fmt.Sprintf("Unsupported operator '%s' for strings", node.Operator))
+	}
+
 	// Handle type promotion: Int -> Float
 	if leftResult.Type != rightResult.Type {
 		if leftResult.Type == TypeInt && rightResult.Type == TypeFloat {
-			// Promote left operand (int) to float
 			t.addAsm("    // Promoting left operand from INT to FLOAT")
-			promotedFloatReg := t.acquireFloatRegister() // Get a new float register for the converted value
+			promotedFloatReg := t.acquireFloatRegister()
 			t.addAsm("    SCVTF D%d, X%d", promotedFloatReg, leftResult.Reg)
-			t.releaseIntRegister(leftResult.Reg) // Release the original int register
-			leftResult.Reg = promotedFloatReg      // Update leftResult to point to the new float register
-			leftResult.Type = TypeFloat
+			t.releaseIntRegister(leftResult.Reg)
+			leftResult = ExpressionResult{Reg: promotedFloatReg, Type: TypeFloat}
 		} else if leftResult.Type == TypeFloat && rightResult.Type == TypeInt {
-			// Promote right operand (int) to float
 			t.addAsm("    // Promoting right operand from INT to FLOAT")
 			promotedFloatReg := t.acquireFloatRegister()
 			t.addAsm("    SCVTF D%d, X%d", promotedFloatReg, rightResult.Reg)
 			t.releaseIntRegister(rightResult.Reg)
-			rightResult.Reg = promotedFloatReg
-			rightResult.Type = TypeFloat
+			rightResult = ExpressionResult{Reg: promotedFloatReg, Type: TypeFloat}
 		} else {
-			panic(fmt.Sprintf("Unsupported type mismatch in binary expression: %s and %s", leftResult.Type, rightResult.Type))
+			panic(fmt.Sprintf("Type mismatch in binary expression: %s and %s", leftResult.Type, rightResult.Type))
 		}
 	}
 
+	// Perform the operation
 	switch leftResult.Type {
 	case TypeInt:
+		reg := leftResult.Reg
 		switch node.Operator {
 		case "+":
-			t.addAsm("    ADD X%d, X%d, X%d", leftResult.Reg, leftResult.Reg, rightResult.Reg)
+			t.addAsm("    ADD X%d, X%d, X%d", reg, leftResult.Reg, rightResult.Reg)
 		default:
 			panic(fmt.Sprintf("Unsupported integer operator: %s", node.Operator))
 		}
 		t.releaseIntRegister(rightResult.Reg)
+		return ExpressionResult{Reg: reg, Type: TypeInt}
 	case TypeFloat:
+		reg := leftResult.Reg
 		switch node.Operator {
 		case "+":
-			t.addAsm("    FADD D%d, D%d, D%d", leftResult.Reg, leftResult.Reg, rightResult.Reg)
+			t.addAsm("    FADD D%d, D%d, D%d", reg, leftResult.Reg, rightResult.Reg)
 		default:
 			panic(fmt.Sprintf("Unsupported float operator: %s", node.Operator))
 		}
 		t.releaseFloatRegister(rightResult.Reg)
+		return ExpressionResult{Reg: reg, Type: TypeFloat}
 	default:
-		panic(fmt.Sprintf("Unsupported type for binary operation: %s", leftResult.Type))
+		panic(fmt.Sprintf("Unsupported type in binary expression: %s", leftResult.Type))
 	}
+}
 
-	return leftResult // The result is in the left register
+func (t *Translator) concatenateStrings(left, right ExpressionResult) ExpressionResult {
+	t.addAsm("    // --- Start of string concatenation ---")
+
+	// Save callee-saved registers we will use as temporaries (X19, X20, X21)
+	// and the link register X30.
+	t.addAsm("    STP X19, X20, [SP, #-16]!")
+	t.addAsm("    STP X21, X30, [SP, #-16]!")
+
+	// Move original string pointers into safe callee-saved registers
+	t.addAsm("    MOV X19, X%d  // Pointer to left string", left.Reg)
+	t.addAsm("    MOV X20, X%d  // Pointer to right string", right.Reg)
+
+	// 1. Get length of left string
+	t.addAsm("    MOV X0, X19")
+	t.addAsm("    BL strlen")
+	t.addAsm("    MOV X21, X0  // Store length of left string")
+
+	// 2. Get length of right string
+	t.addAsm("    MOV X0, X20")
+	t.addAsm("    BL strlen")
+
+	// 3. Allocate memory for new string (len(left) + len(right) + 1)
+	t.addAsm("    ADD X0, X0, X21  // Total length")
+	t.addAsm("    ADD X0, X0, #1     // Add 1 for null terminator")
+	t.addAsm("    BL malloc")
+	// X0 now holds the pointer to the new buffer. Save it in X21.
+	t.addAsm("    MOV X21, X0      // X21 now holds the new string pointer")
+
+	// 4. Copy left string into new buffer
+	t.addAsm("    MOV X0, X21      // 1st arg for strcpy: destination")
+	t.addAsm("    MOV X1, X19      // 2nd arg for strcpy: source (left string)")
+	t.addAsm("    BL strcpy")
+
+	// 5. Append right string to new buffer
+	t.addAsm("    MOV X0, X21      // 1st arg for strcat: destination")
+	t.addAsm("    MOV X1, X20      // 2nd arg for strcat: source (right string)")
+	t.addAsm("    BL strcat")
+
+	// The final concatenated string is in X21. Move it to a fresh register from our pool.
+	newStringReg := t.acquireIntRegister()
+	t.addAsm("    MOV X%d, X21", newStringReg)
+
+	// Restore callee-saved registers and link register
+	t.addAsm("    LDP X21, X30, [SP], #16")
+	t.addAsm("    LDP X19, X20, [SP], #16")
+
+	// Release the original registers
+	t.releaseIntRegister(left.Reg)
+	t.releaseIntRegister(right.Reg)
+
+	t.addAsm("    // --- End of string concatenation ---")
+	return ExpressionResult{Reg: newStringReg, Type: TypeString}
 }
 
 func (t *Translator) VisitUnaryExpr(node *ast.UnaryExpr) interface{} {
@@ -930,18 +999,15 @@ func (t *Translator) VisitStringLiteral(node *ast.StringLiteral) interface{} {
 	if t.DebugMode {
 		fmt.Printf("Translator.Visiting StringLiteral: %s\n", node.Value)
 	}
-	// node.Value is like "Hello, world!" (includes the quotes).
-	// .asciz directive in GAS expects the string content, typically also quoted in the assembly source.
-	// However, our addStringData function expects the raw content to put inside "".
-	// So, we need to strip the outer quotes from node.Value before passing.
-	rawValue := node.Value
-	if len(rawValue) >= 2 && rawValue[0] == '"' && rawValue[len(rawValue)-1] == '"' {
-		rawValue = rawValue[1 : len(rawValue)-1]
-	}
-	// TODO: Handle escape sequences within the string if V lang supports them (e.g., \n, \t)
-	// For now, assuming rawValue is what we want between the .asciz "".
-	label := t.addStringData(rawValue) // addStringData now handles quoting for .asciz
-	return label                       // Return the label for this string in the .data section
+	// Add the string literal to the .data section
+	label := t.addStringData(node.Value)
+
+	// Load the address of the string into a register
+	reg := t.acquireIntRegister()
+	t.addAsm("    LDR X%d, =%s", reg, label)
+
+	// Return an ExpressionResult
+	return ExpressionResult{Reg: reg, Type: TypeString}
 }
 
 func (t *Translator) VisitCharLiteral(node *ast.CharLiteral) interface{} {

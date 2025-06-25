@@ -1,8 +1,4 @@
 fn main() {
-    mut p bool = true
-    mut q bool = false
-    println("true && false:", p && q) // Expected: false
-    println("true || false:", p || q) // Expected: true
-    println("!true:", !p)             // Expected: false
-    println("!false:", !q)            // Expected: true
+    mut prec_result := 5 * 2 + 3 > 12 && !false // (10 + 3) > 12 && true -> 13 > 12 && true -> true && true -> true
+    println("5 * 2 + 3 > 12 && !false is", prec_result) // Expected: true
 }

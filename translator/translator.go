@@ -370,40 +370,84 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 	}
 	varName := node.Name.Name
 
-	// Handle initializer
+	// --- LOCAL VARIABLE ---
+	if t.currentFuncDef != nil {
+		if node.Initializer == nil {
+			// This case should be caught by the parser for `:=` declarations.
+			// For `var x int`, it's valid but we'll handle it as uninitialized.
+			// V requires initialization, so we can probably panic.
+			// For now, let's stick to what the old code did: default initialize.
+		}
+
+		// 1. Evaluate the initializer expression.
+		result := node.Initializer.Accept(t).(ExpressionResult)
+
+		// 2. Define the symbol in the current scope.
+		mangledName := t.defineSymbol(varName, result.Type)
+
+		// 3. Allocate space for the variable in the .data section.
+		// (A real compiler would use the stack here)
+		switch result.Type {
+		case TypeInt:
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad 0", mangledName))
+		case TypeBool:
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .byte 0", mangledName))
+		case TypeFloat:
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double 0.0", mangledName))
+		case TypeString:
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad 0", mangledName)) // For pointer
+		default:
+			panic(fmt.Sprintf("Unsupported variable type for allocation: %s", result.Type))
+		}
+
+		// 4. Generate code to store the initial value.
+		addrReg := t.acquireIntRegister()
+		t.addAsm("    LDR X%d, =%s", addrReg, mangledName)
+		switch result.Type {
+		case TypeInt, TypeString: // String is a pointer (X reg), Int uses X reg for 64-bit
+			t.addAsm("    STR X%d, [X%d]", result.Reg, addrReg)
+		case TypeBool:
+			t.addAsm("    STRB W%d, [X%d]", result.Reg, addrReg) // Store byte for bool
+		case TypeFloat:
+			t.addAsm("    STR D%d, [X%d]", result.Reg, addrReg)
+		}
+		t.releaseIntRegister(addrReg)
+
+		// 5. Release the register that held the expression result.
+		if result.Type == TypeFloat {
+			t.releaseFloatRegister(result.Reg)
+		} else {
+			t.releaseIntRegister(result.Reg)
+		}
+		return nil
+	}
+
+	// --- GLOBAL VARIABLE ---
 	if node.Initializer != nil {
+		// Global variables must be initialized with constant literals.
 		switch init := node.Initializer.(type) {
 		case *ast.IntegerLiteral:
-			// For global integers, we define them in the data section and store their type.
 			mangledName := t.defineSymbol(varName, TypeInt)
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word %s", mangledName, init.Value))
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad %s", mangledName, init.Value))
 		case *ast.UnaryExpr:
-			// Handle unary expressions, e.g., negative numbers
 			if init.Operator == "-" {
 				if intLit, ok := init.Right.(*ast.IntegerLiteral); ok {
 					mangledName := t.defineSymbol(varName, TypeInt)
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word -%s", mangledName, intLit.Value))
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad -%s", mangledName, intLit.Value))
 				} else {
-					// Unhandled unary expression operand, default to 0
-					mangledName := t.defineSymbol(varName, TypeUnknown)
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
+					panic("Global initializer with unary '-' must be an integer literal.")
 				}
 			} else {
-				// Unhandled unary operator, default to 0
-				mangledName := t.defineSymbol(varName, TypeUnknown)
-				t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
+				panic("Unsupported unary operator for global initializer.")
 			}
 		case *ast.StringLiteral:
-			// For global strings, we store the string, and the variable holds its address.
 			strLabel := t.addStringData(init.Value)
 			mangledName := t.defineSymbol(varName, TypeString)
 			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad %s", mangledName, strLabel))
 		case *ast.FloatLiteral:
-			// For global floats, we define them in the data section and store their type.
 			mangledName := t.defineSymbol(varName, TypeFloat)
 			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double %s", mangledName, init.Value))
 		case *ast.BoolLiteral:
-			// For global booleans, we define them as a byte.
 			val := "0"
 			if init.Value {
 				val = "1"
@@ -411,43 +455,34 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 			mangledName := t.defineSymbol(varName, TypeBool)
 			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .byte %s", mangledName, val))
 		default:
-			// Unhandled initializer type, default to 0
-			mangledName := t.defineSymbol(varName, TypeUnknown)
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
+			panic(fmt.Sprintf("Global variable '%s' must be initialized with a constant literal, not %T", varName, init))
 		}
 	} else {
-		// Uninitialized variable, assign default value based on type
+		// Uninitialized global variable.
 		if node.ExplicitType != nil {
 			if typeName, ok := node.ExplicitType.(*ast.TypeName); ok {
 				switch typeName.Name {
 				case "int":
 					mangledName := t.defineSymbol(varName, TypeInt)
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad 0", mangledName))
 				case "float64":
 					mangledName := t.defineSymbol(varName, TypeFloat)
 					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double 0.0", mangledName))
 				case "string":
-					strLabel := t.addStringData("")
+					strLabel := t.addStringData("\"\"") // Empty string
 					mangledName := t.defineSymbol(varName, TypeString)
 					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad %s", mangledName, strLabel))
 				case "bool":
 					mangledName := t.defineSymbol(varName, TypeBool)
 					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .byte 0", mangledName)) // 0 for false
 				default:
-					// Default for unhandled explicit types
-					mangledName := t.defineSymbol(varName, TypeUnknown)
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
+					panic(fmt.Sprintf("Unknown type '%s' for global variable '%s'", typeName.Name, varName))
 				}
 			} else {
-				// Type is not a simple TypeName, default for now
-				mangledName := t.defineSymbol(varName, TypeUnknown)
-				t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
+				panic(fmt.Sprintf("Unsupported type declaration for global variable '%s'", varName))
 			}
 		} else {
-			// Type not specified (e.g. from := which requires an initializer), so this case is for declarations without initializer.
-			// Default to integer 0.
-			mangledName := t.defineSymbol(varName, TypeUnknown)
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
+			panic(fmt.Sprintf("Global variable '%s' must have an explicit type or an initializer.", varName))
 		}
 	}
 
@@ -876,6 +911,15 @@ func (t *Translator) VisitTypeOfExpr(node *ast.TypeOfExpr) interface{} {
 	return nil
 }
 
+func isRelationalOp(op string) bool {
+	switch op {
+	case ">", "<", ">=", "<=", "==", "!=", "&&", "||":
+		return true
+	default:
+		return false
+	}
+}
+
 func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 	if t.DebugMode {
 		fmt.Printf("Translator.Visiting BinaryExpr: %s\n", node.Operator)
@@ -1206,7 +1250,7 @@ func (t *Translator) VisitIdentifierExpr(node *ast.IdentifierExpr) interface{} {
 		return ExpressionResult{Reg: valReg, Type: TypeBool}
 	default:
 		t.releaseIntRegister(addrReg) // Release register even on panic
-		panic(fmt.Sprintf("Loading for type %s not implemented", varType))
+		panic(fmt.Sprintf("Loading for type %s not implemented for identifier '%s'", varType, node.Name))
 	}
 }
 

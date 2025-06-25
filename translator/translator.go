@@ -560,6 +560,25 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 			// TODO: Handle other RHS types like IdentifierExpr
 			fmt.Fprintf(os.Stderr, "Unsupported R-value in compound assignment: %T\n", node.Right)
 		}
+	case "-=":
+		if varType != TypeInt {
+			fmt.Fprintf(os.Stderr, "Type mismatch in compound assignment to %s. Expected Int.\n", varName)
+			return nil
+		}
+		// For now, assume RHS is an IntegerLiteral for simplicity
+		if rhs, ok := node.Right.(*ast.IntegerLiteral); ok {
+			t.addAsm("    // --- Start of compound assignment (-=) to %s ---", varName)
+			t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
+			t.addAsm("    LDR W11, [X10]")           // Load current value of var
+			t.addAsm("    MOV W12, #%s", rhs.Value) // Load immediate integer value from RHS
+			t.addAsm("    SUB W11, W11, W12")        // Perform subtraction
+			t.addAsm("    STR W11, [X10]")           // Store result back
+			t.addAsm("    // --- End of compound assignment (-=) to %s ---", varName)
+			t.addAsm("")
+		} else {
+			// TODO: Handle other RHS types like IdentifierExpr
+			fmt.Fprintf(os.Stderr, "Unsupported R-value in compound assignment: %T\n", node.Right)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "Unsupported assignment operator: %s\n", node.Operator)
 	}

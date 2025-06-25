@@ -57,9 +57,12 @@ type Translator struct {
 	hasIntFormatStr    bool              // Tracks if the integer format string has been added
 	hasFloatFormatStr  bool              // Tracks if the float format string has been added
 	hasStringFormatStr bool              // Tracks if the string format string has been added
+	trueStrLabel       string            // Label for the "true" string literal
+	falseStrLabel      string            // Label for the "false" string literal
 	currentFuncDef     *ast.FunctionDecl // Keep track of the current function being defined
 	DebugMode          bool
 	needsStringHelpers bool              // Tracks if string concatenation helpers are needed
+	needsStrcmp        bool              // Tracks if strcmp is needed
 
 	// Register allocation
 	intRegs   []bool // Availability of general-purpose integer registers (X9-X15)
@@ -88,8 +91,11 @@ func NewTranslator(debugMode bool) *Translator {
 		hasIntFormatStr:    false,
 		hasFloatFormatStr:  false,
 		hasStringFormatStr: false,
+		trueStrLabel:       "",
+		falseStrLabel:      "",
 		currentFuncDef:     nil,
 		DebugMode:          debugMode,
+		needsStrcmp:        false,
 		intRegs:            make([]bool, numIntRegs),
 		floatRegs:          make([]bool, numFloatRegs),
 	}
@@ -147,6 +153,8 @@ func (t *Translator) releaseFloatRegister(reg int) {
 func (t *Translator) addFloatData(floatStr string) string {
 	label := fmt.Sprintf("F%d", t.stringCounter)
 	t.stringCounter++
+	// Align to 8-byte boundary for doubles
+	t.dataSection = append(t.dataSection, ".align 3")
 	t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double %s", label, floatStr))
 	return label
 }
@@ -191,8 +199,10 @@ func (t *Translator) lookupSymbol(name string) (mangledName string, vtype VarTyp
 
 func (t *Translator) addStringData(strContent string) string {
 	label := fmt.Sprintf("str%d", t.stringCounter)
-	t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .asciz %q", label, strContent))
 	t.stringCounter++
+	// Align to 4-byte boundary for strings, which is good practice.
+	t.dataSection = append(t.dataSection, ".align 2")
+	t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .asciz %q", label, strContent))
 	return label
 }
 
@@ -225,6 +235,9 @@ func (t *Translator) GetAssembly() []string {
 			finalAsm = append(finalAsm, ".extern strlen")
 			finalAsm = append(finalAsm, ".extern strcpy")
 			finalAsm = append(finalAsm, ".extern strcat")
+		}
+		if t.needsStrcmp {
+			finalAsm = append(finalAsm, ".extern strcmp")
 		}
 		if t.needsPrintf {
 			finalAsm = append(finalAsm, ".extern printf")
@@ -876,8 +889,34 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 		if node.Operator == "+" {
 			t.needsStringHelpers = true
 			return t.concatenateStrings(leftResult, rightResult)
+		} else if node.Operator == "==" || node.Operator == "!=" {
+			t.needsStrcmp = true
+			resultReg := t.acquireIntRegister()
+
+			// strcmp(s1, s2) -> arguments in X0, X1
+			t.addAsm("    MOV X0, X%d", leftResult.Reg)
+			t.addAsm("    MOV X1, X%d", rightResult.Reg)
+			t.addAsm("    BL strcmp")
+
+			// strcmp returns 0 if equal. Compare result in W0 with 0.
+			t.addAsm("    CMP W0, #0")
+
+			cond := ""
+			if node.Operator == "==" {
+				cond = "EQ" // Set if equal
+			} else {
+				cond = "NE" // Set if not equal
+			}
+			// Set result register to 1 if condition is met, 0 otherwise.
+			t.addAsm("    CSET X%d, %s", resultReg, cond)
+
+			t.releaseIntRegister(leftResult.Reg)
+			t.releaseIntRegister(rightResult.Reg)
+
+			return ExpressionResult{Reg: resultReg, Type: TypeBool}
+		} else {
+			panic(fmt.Sprintf("Unsupported operator '%s' for strings", node.Operator))
 		}
-		panic(fmt.Sprintf("Unsupported operator '%s' for strings", node.Operator))
 	}
 
 	// Handle type promotion: Int -> Float
@@ -919,6 +958,26 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 			t.addAsm("    MUL X%d, X%d, X%d", divResultReg, divResultReg, rightResult.Reg)   // divResultReg = (a / n) * n
 			t.addAsm("    SUB X%d, X%d, X%d", resultReg, leftResult.Reg, divResultReg)      // resultReg = a - divResultReg
 			t.releaseIntRegister(divResultReg)
+		case "==", "!=", ">", "<", ">=", "<=":
+			t.addAsm("    CMP X%d, X%d", leftResult.Reg, rightResult.Reg)
+			cond := ""
+			switch node.Operator {
+			case "==":
+				cond = "EQ"
+			case "!=":
+				cond = "NE"
+			case ">":
+				cond = "GT"
+			case "<":
+				cond = "LT"
+			case ">=":
+				cond = "GE"
+			case "<=":
+				cond = "LE"
+			}
+			t.addAsm("    CSET X%d, %s", resultReg, cond)
+			t.releaseIntRegister(rightResult.Reg)
+			return ExpressionResult{Reg: resultReg, Type: TypeBool}
 		default:
 			panic(fmt.Sprintf("Unsupported integer operator: %s", node.Operator))
 		}
@@ -930,6 +989,23 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 			t.releaseIntRegister(rightResult.Reg)
 		}
 		return ExpressionResult{Reg: resultReg, Type: TypeInt}
+	case TypeBool:
+		resultReg := leftResult.Reg
+		switch node.Operator {
+		case "==", "!=":
+			t.addAsm("    CMP X%d, X%d", leftResult.Reg, rightResult.Reg)
+			cond := ""
+			if node.Operator == "==" {
+				cond = "EQ"
+			} else {
+				cond = "NE"
+			}
+			t.addAsm("    CSET X%d, %s", resultReg, cond)
+			t.releaseIntRegister(rightResult.Reg)
+			return ExpressionResult{Reg: resultReg, Type: TypeBool}
+		default:
+			panic(fmt.Sprintf("Unsupported boolean operator: %s", node.Operator))
+		}
 	case TypeFloat:
 		reg := leftResult.Reg
 		switch node.Operator {
@@ -952,6 +1028,28 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 			t.addAsm("    FSUB D%d, D%d, D%d", reg, leftResult.Reg, tmp1)             // reg = x - tmp1
 			t.releaseFloatRegister(tmp1)
 			t.releaseFloatRegister(tmp2)
+		case "==", "!=", ">", "<", ">=", "<=":
+			resultReg := t.acquireIntRegister()
+			t.addAsm("    FCMP D%d, D%d", leftResult.Reg, rightResult.Reg)
+			cond := ""
+			switch node.Operator {
+			case "==":
+				cond = "EQ"
+			case "!=":
+				cond = "NE"
+			case ">":
+				cond = "GT"
+			case "<":
+				cond = "LT"
+			case ">=":
+				cond = "GE"
+			case "<=":
+				cond = "LE"
+			}
+			t.addAsm("    CSET X%d, %s", resultReg, cond)
+			t.releaseFloatRegister(leftResult.Reg)
+			t.releaseFloatRegister(rightResult.Reg)
+			return ExpressionResult{Reg: resultReg, Type: TypeBool}
 		default:
 			panic(fmt.Sprintf("Unsupported float operator: %s", node.Operator))
 		}
@@ -1159,10 +1257,13 @@ func (t *Translator) handlePrintln(args []ast.Expression) {
 	var formatString strings.Builder
 	var evaluatedArgs []ExpressionResult
 
-	// 1. Build format string and evaluate expressions
-	for _, arg := range args {
+	// 1. Evaluate all expressions first and build the format string.
+	for i, arg := range args {
+		if i > 0 {
+			formatString.WriteString(" ") // Add space between arguments
+		}
+
 		if strLit, ok := arg.(*ast.StringLiteral); ok {
-			// Sanitize the string to escape any '%' characters for printf.
 			sanitizedStr := strings.ReplaceAll(strings.Trim(strLit.Value, "\""), "%", "%%")
 			formatString.WriteString(sanitizedStr)
 		} else {
@@ -1171,51 +1272,78 @@ func (t *Translator) handlePrintln(args []ast.Expression) {
 			switch result.Type {
 			case TypeInt:
 				formatString.WriteString("%d")
+			case TypeBool:
+				formatString.WriteString("%s") // Booleans will be printed as "true" or "false"
 			case TypeFloat:
 				formatString.WriteString("%f")
 			case TypeString:
 				formatString.WriteString("%s")
 			default:
-				//panic(fmt.Sprintf("Unsupported type for println: %s", result.Type))
+				panic(fmt.Sprintf("Unsupported type for println: %s", result.Type))
 			}
 		}
 	}
 	formatString.WriteString("\n")
 
-	// 2. Add the format string to the data section
+	// 2. Add the format string to the data section.
 	formatLabel := t.addStringData(formatString.String())
 
-	// 3. Load arguments into registers for printf
-	// Load format string address into X0
+	// 3. Load format string address into X0.
 	t.addAsm("    LDR X0, =%s", formatLabel)
 
-	intArgCount := 0
+	// 4. Load arguments into registers X1-X7 and D0-D7.
+	intArgCount := 1 // Start from X1
 	floatArgCount := 0
-
 	for _, arg := range evaluatedArgs {
 		switch arg.Type {
-		case TypeInt:
-			if intArgCount < 7 { // X1-X7 for integer/pointer arguments
-				t.addAsm("    MOV X%d, X%d", intArgCount+1, arg.Reg)
+		case TypeInt, TypeString:
+			if intArgCount < 8 {
+				t.addAsm("    MOV X%d, X%d", intArgCount, arg.Reg)
+				intArgCount++
+			}
+			t.releaseIntRegister(arg.Reg)
+		case TypeBool:
+			if intArgCount < 8 {
+				// Ensure "true" and "false" strings are in the data section
+				if t.trueStrLabel == "" {
+					t.trueStrLabel = t.addStringData("true")
+				}
+				if t.falseStrLabel == "" {
+					t.falseStrLabel = t.addStringData("false")
+				}
+
+				argReg := intArgCount
+				trueLabelReg := t.acquireIntRegister()
+				falseLabelReg := t.acquireIntRegister()
+
+				// Load addresses of "true" and "false" strings into temporary registers
+				t.addAsm("    LDR X%d, =%s", trueLabelReg, t.trueStrLabel)
+				t.addAsm("    LDR X%d, =%s", falseLabelReg, t.falseStrLabel)
+
+				// Compare the boolean value (0 or 1) with 0
+				t.addAsm("    CMP X%d, #0", arg.Reg)
+
+				// Conditionally select the correct address into the argument register
+				// If NE (not equal to 0, so it's 1/true), use trueLabelReg. Else use falseLabelReg.
+				t.addAsm("    CSEL X%d, X%d, X%d, NE", argReg, trueLabelReg, falseLabelReg)
+
+				t.releaseIntRegister(trueLabelReg)
+				t.releaseIntRegister(falseLabelReg)
 				t.releaseIntRegister(arg.Reg)
 				intArgCount++
+			} else {
+				t.releaseIntRegister(arg.Reg) // Release if we can't pass it
 			}
 		case TypeFloat:
-			if floatArgCount < 8 { // D0-D7 for float arguments
-				t.addAsm("    FMOV D%d, D%d", floatArgCount, arg.Reg) // Note: printf varargs start D0
-				t.releaseFloatRegister(arg.Reg)
+			if floatArgCount < 8 {
+				t.addAsm("    FMOV D%d, D%d", floatArgCount, arg.Reg)
 				floatArgCount++
 			}
-		case TypeString: // Assuming string address is in an X register
-			if intArgCount < 7 {
-				t.addAsm("    MOV X%d, X%d", intArgCount+1, arg.Reg)
-				t.releaseIntRegister(arg.Reg)
-				intArgCount++
-			}
+			t.releaseFloatRegister(arg.Reg)
 		}
 	}
 
-	// 4. Call printf
+	// 5. Call printf.
 	t.addAsm("    BL printf")
 }
 
@@ -1255,18 +1383,34 @@ func (t *Translator) VisitStringLiteral(node *ast.StringLiteral) interface{} {
 
 func (t *Translator) VisitCharLiteral(node *ast.CharLiteral) interface{} {
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting CharLiteral")
+		fmt.Printf("Translator.Visiting CharLiteral: %s\n", node.Value)
 	}
-	// TODO: Implement CharLiteral translation
-	return nil
+
+	// The parser provides the character itself (e.g., 'a' becomes string "a").
+	// We just need to get the integer value of the first rune.
+	var runeValue rune
+	if len(node.Value) > 0 {
+		runeValue = []rune(node.Value)[0]
+	} else {
+		panic("empty character literal")
+	}
+
+	reg := t.acquireIntRegister()
+	t.addAsm("    MOV X%d, #%d", reg, runeValue)
+	return ExpressionResult{Reg: reg, Type: TypeInt}
 }
 
 func (t *Translator) VisitBoolLiteral(node *ast.BoolLiteral) interface{} {
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting BoolLiteral")
+		fmt.Printf("Translator.Visiting BoolLiteral: %v\n", node.Value)
 	}
-	// TODO: Implement BoolLiteral translation
-	return nil
+	reg := t.acquireIntRegister()
+	value := 0
+	if node.Value {
+		value = 1
+	}
+	t.addAsm("    MOV X%d, #%d", reg, value)
+	return ExpressionResult{Reg: reg, Type: TypeBool}
 }
 
 func (t *Translator) VisitNilLiteral(node *ast.NilLiteral) interface{} {

@@ -683,8 +683,43 @@ func (t *Translator) VisitIncDecStmt(node *ast.IncDecStmt) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting IncDecStmt")
 	}
-	// TODO: Implement IncDecStmt translation
-	// Example: node.LValue.Accept(t) // if LValue needs translation or analysis
+
+	// Get the variable name from the left side (LHS)
+	var varName string
+	if ident, ok := node.LValue.(*ast.IdentifierExpr); ok {
+		varName = ident.Name
+	} else {
+		fmt.Fprintf(os.Stderr, "Unsupported L-value in inc/dec statement: %T\n", node.LValue)
+		return nil
+	}
+
+	// We need to know the type of the variable to use the correct store instruction.
+	mangledName, varType, typeExists := t.lookupSymbol(varName)
+	if !typeExists {
+		fmt.Fprintf(os.Stderr, "Inc/dec on undeclared variable: %s\n", varName)
+		return nil
+	}
+
+	if varType != TypeInt {
+		fmt.Fprintf(os.Stderr, "Inc/dec on non-integer variable: %s\n", varName)
+		return nil
+	}
+
+	t.addAsm("    // --- Start of %s operation on %s ---", node.Operator, varName)
+	t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
+	t.addAsm("    LDR W11, [X10]")           // Load current value of var
+
+	switch node.Operator {
+	case "++":
+		t.addAsm("    ADD W11, W11, #1") // Increment
+	case "--":
+		t.addAsm("    SUB W11, W11, #1") // Decrement
+	}
+
+	t.addAsm("    STR W11, [X10]") // Store result back
+	t.addAsm("    // --- End of %s operation on %s ---", node.Operator, varName)
+	t.addAsm("")
+
 	return nil
 }
 

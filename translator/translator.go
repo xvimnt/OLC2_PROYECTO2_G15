@@ -18,13 +18,40 @@ const (
 	TypeFloat
 	TypeString
 	TypeBool
+	TypeVoid
+	TypeArray
+	TypeStruct
 )
+
+func (v VarType) String() string {
+	switch v {
+	case TypeInt:
+		return "Int"
+	case TypeFloat:
+		return "Float"
+	case TypeString:
+		return "String"
+	case TypeBool:
+		return "Bool"
+	case TypeVoid:
+		return "Void"
+	case TypeArray:
+		return "Array"
+	case TypeStruct:
+		return "Struct"
+	default:
+		return "Unknown"
+	}
+}
 
 // Translator translates AST nodes into assembly code.
 type Translator struct {
-	asm                []string // Stores generated .text section assembly lines
-	dataSection        []string // Stores generated .data section assembly lines
-	symbolTable        map[string]VarType
+	asm                []string          // Stores generated .text section assembly lines
+	dataSection        []string          // Stores generated .data section assembly lines
+	symbolTables       []map[string]string // Stack of maps: original name -> mangled name
+	varInfo            map[string]VarType  // Map: mangled name -> type
+	scopeCounter       int
+	scopeIDStack       []int
 	stringCounter      int               // For generating unique string labels
 	needsPrintf        bool              // Tracks if printf is used (for .extern printf)
 	hasIntFormatStr    bool              // Tracks if the integer format string has been added
@@ -36,10 +63,13 @@ type Translator struct {
 
 // NewTranslator creates a new Translator instance.
 func NewTranslator(debugMode bool) *Translator {
-	return &Translator{
+	t := &Translator{
 		asm:                make([]string, 0),
 		dataSection:        make([]string, 0),
-		symbolTable:        make(map[string]VarType),
+		symbolTables:       []map[string]string{make(map[string]string)}, // Global scope
+		varInfo:            make(map[string]VarType),
+		scopeCounter:       0,
+		scopeIDStack:       []int{0}, // Global scope ID
 		stringCounter:      0,
 		needsPrintf:        false,
 		hasIntFormatStr:    false,
@@ -48,10 +78,47 @@ func NewTranslator(debugMode bool) *Translator {
 		currentFuncDef:     nil,
 		DebugMode:          debugMode,
 	}
+	return t
 }
 
 // addStringData adds a string to the .data section and returns its label.
 // It uses %q to handle proper quoting and escaping for the assembler.
+func (t *Translator) enterScope() {
+	t.scopeCounter++
+	t.scopeIDStack = append(t.scopeIDStack, t.scopeCounter)
+	t.symbolTables = append(t.symbolTables, make(map[string]string))
+}
+
+func (t *Translator) exitScope() {
+	t.scopeIDStack = t.scopeIDStack[:len(t.scopeIDStack)-1]
+	t.symbolTables = t.symbolTables[:len(t.symbolTables)-1]
+}
+
+func (t *Translator) currentScopeID() int {
+	return t.scopeIDStack[len(t.scopeIDStack)-1]
+}
+
+// defineSymbol creates a mangled name for a variable, stores it, and returns it.
+func (t *Translator) defineSymbol(name string, vtype VarType) string {
+	// Mangle name to be unique across scopes
+	mangledName := fmt.Sprintf("%s_%d", name, t.currentScopeID())
+	currentScope := t.symbolTables[len(t.symbolTables)-1]
+	currentScope[name] = mangledName
+	t.varInfo[mangledName] = vtype
+	return mangledName
+}
+
+// lookupSymbol finds a variable's mangled name and type, searching from the current scope outwards.
+func (t *Translator) lookupSymbol(name string) (mangledName string, vtype VarType, exists bool) {
+	for i := len(t.symbolTables) - 1; i >= 0; i-- {
+		if mangledName, ok := t.symbolTables[i][name]; ok {
+			vtype := t.varInfo[mangledName]
+			return mangledName, vtype, true
+		}
+	}
+	return "", TypeUnknown, false
+}
+
 func (t *Translator) addStringData(strContent string) string {
 	label := fmt.Sprintf("str%d", t.stringCounter)
 	t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .asciz %q", label, strContent))
@@ -149,9 +216,15 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 
 	// TODO: Allocate space for local variables based on function needs
 
+	t.enterScope() // Scope for parameters and locals
+
+	// TODO: Process parameters and add them to the symbol table
+
 	if node.Body != nil {
 		node.Body.Accept(t)
 	}
+
+	t.exitScope()
 
 	// Epilogue
 	// Ensure a return path even if no explicit return statement for void functions (like main often is implicitly)
@@ -202,45 +275,45 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 		switch init := node.Initializer.(type) {
 		case *ast.IntegerLiteral:
 			// For global integers, we define them in the data section and store their type.
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word %s", varName, init.Value))
-			t.symbolTable[varName] = TypeInt
+			mangledName := t.defineSymbol(varName, TypeInt)
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word %s", mangledName, init.Value))
 		case *ast.UnaryExpr:
 			// Handle unary expressions, e.g., negative numbers
 			if init.Operator == "-" {
 				if intLit, ok := init.Right.(*ast.IntegerLiteral); ok {
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word -%s", varName, intLit.Value))
-					t.symbolTable[varName] = TypeInt
+					mangledName := t.defineSymbol(varName, TypeInt)
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word -%s", mangledName, intLit.Value))
 				} else {
 					// Unhandled unary expression operand, default to 0
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
-					t.symbolTable[varName] = TypeUnknown
+					mangledName := t.defineSymbol(varName, TypeUnknown)
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
 				}
 			} else {
 				// Unhandled unary operator, default to 0
-				t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
-				t.symbolTable[varName] = TypeUnknown
+				mangledName := t.defineSymbol(varName, TypeUnknown)
+				t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
 			}
 		case *ast.StringLiteral:
 			// For global strings, we store the string, and the variable holds its address.
 			strLabel := t.addStringData(init.Value)
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad %s", varName, strLabel))
-			t.symbolTable[varName] = TypeString
+			mangledName := t.defineSymbol(varName, TypeString)
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad %s", mangledName, strLabel))
 		case *ast.FloatLiteral:
 			// For global floats, we define them in the data section and store their type.
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double %s", varName, init.Value))
-			t.symbolTable[varName] = TypeFloat
+			mangledName := t.defineSymbol(varName, TypeFloat)
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double %s", mangledName, init.Value))
 		case *ast.BoolLiteral:
 			// For global booleans, we define them as a byte.
 			val := "0"
 			if init.Value {
 				val = "1"
 			}
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .byte %s", varName, val))
-			t.symbolTable[varName] = TypeBool
+			mangledName := t.defineSymbol(varName, TypeBool)
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .byte %s", mangledName, val))
 		default:
 			// Unhandled initializer type, default to 0
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
-			t.symbolTable[varName] = TypeUnknown
+			mangledName := t.defineSymbol(varName, TypeUnknown)
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
 		}
 	} else {
 		// Uninitialized variable, assign default value based on type
@@ -248,33 +321,33 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 			if typeName, ok := node.ExplicitType.(*ast.TypeName); ok {
 				switch typeName.Name {
 				case "int":
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
-					t.symbolTable[varName] = TypeInt
+					mangledName := t.defineSymbol(varName, TypeInt)
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
 				case "float64":
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double 0.0", varName))
-					t.symbolTable[varName] = TypeFloat
+					mangledName := t.defineSymbol(varName, TypeFloat)
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double 0.0", mangledName))
 				case "string":
 					strLabel := t.addStringData("")
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad %s", varName, strLabel))
-					t.symbolTable[varName] = TypeString
+					mangledName := t.defineSymbol(varName, TypeString)
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad %s", mangledName, strLabel))
 				case "bool":
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .byte 0", varName)) // 0 for false
-					t.symbolTable[varName] = TypeBool
+					mangledName := t.defineSymbol(varName, TypeBool)
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .byte 0", mangledName)) // 0 for false
 				default:
 					// Default for unhandled explicit types
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
-					t.symbolTable[varName] = TypeUnknown
+					mangledName := t.defineSymbol(varName, TypeUnknown)
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
 				}
 			} else {
 				// Type is not a simple TypeName, default for now
-				t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
-				t.symbolTable[varName] = TypeUnknown
+				mangledName := t.defineSymbol(varName, TypeUnknown)
+				t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
 			}
 		} else {
 			// Type not specified (e.g. from := which requires an initializer), so this case is for declarations without initializer.
 			// Default to integer 0.
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
-			t.symbolTable[varName] = TypeUnknown
+			mangledName := t.defineSymbol(varName, TypeUnknown)
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", mangledName))
 		}
 	}
 
@@ -287,10 +360,11 @@ func (t *Translator) VisitBlockStmt(node *ast.BlockStmt) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting BlockStmt")
 	}
-	// TODO: Implement BlockStmt translation
+	t.enterScope()
 	for _, stmt := range node.Statements {
 		stmt.Accept(t)
 	}
+	t.exitScope()
 	return nil
 }
 
@@ -298,14 +372,102 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting AssignStmt")
 	}
-	// TODO: Implement AssignStmt translation
-	// Based on ast.AssignStmt, Left and Right are single ast.Expression nodes.
-	if node.Left != nil {
-		node.Left.Accept(t)
+
+	// Get the variable name from the left side (LHS)
+	var varName string
+	if ident, ok := node.Left.(*ast.IdentifierExpr); ok {
+		varName = ident.Name
+	} else {
+		// This is a simplification. Real-world scenarios would handle struct fields, array elements, etc.
+		fmt.Fprintf(os.Stderr, "Unsupported L-value in assignment: %T\n", node.Left)
+		return nil
 	}
-	if node.Right != nil {
-		node.Right.Accept(t)
+
+	// We need to know the type of the variable to use the correct store instruction.
+	mangledName, varType, typeExists := t.lookupSymbol(varName)
+	if !typeExists {
+		fmt.Fprintf(os.Stderr, "Assignment to undeclared variable: %s\n", varName)
+		return nil
 	}
+
+	// Evaluate the right side (RHS) and generate code to store the value.
+	// This is a simplified evaluation that handles literals directly.
+	// A more robust implementation would have expression visitors return results in registers.
+	switch rhs := node.Right.(type) {
+	case *ast.BoolLiteral:
+		if varType != TypeBool {
+			fmt.Fprintf(os.Stderr, "Type mismatch in assignment to %s. Expected Bool.\n", varName)
+			return nil
+		}
+		val := "0"
+		if rhs.Value {
+			val = "1"
+		}
+		t.addAsm("    // --- Start of assignment to %s ---", varName)
+		t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
+		t.addAsm("    MOV W11, #%s", val)        // Load immediate value (0 or 1)
+		t.addAsm("    STRB W11, [X10]")         // Store byte value
+		t.addAsm("    // --- End of assignment to %s ---", varName)
+		t.addAsm("") // Add a blank line for readability after assignment
+
+	case *ast.IntegerLiteral:
+		if varType != TypeInt {
+			fmt.Fprintf(os.Stderr, "Type mismatch in assignment to %s. Expected Int.\n", varName)
+			return nil
+		}
+		t.addAsm("    // --- Start of assignment to %s ---", varName)
+		t.addAsm("    LDR X10, =%s", mangledName)      // Load address of the variable
+		t.addAsm("    MOV W11, #%s", rhs.Value)    // Load immediate integer value
+		t.addAsm("    STR W11, [X10]")                // Store word value
+		t.addAsm("    // --- End of assignment to %s ---", varName)
+		t.addAsm("") // Add a blank line for readability after assignment
+
+	case *ast.IdentifierExpr:
+		rhsVarName := rhs.Name
+		rhsMangledName, rhsVarType, rhsExists := t.lookupSymbol(rhsVarName)
+		if !rhsExists {
+			fmt.Fprintf(os.Stderr, "Assignment from undeclared variable: %s\n", rhsVarName)
+			return nil
+		}
+
+		// Basic type check
+		if varType != rhsVarType {
+			fmt.Fprintf(os.Stderr, "Type mismatch in assignment to %s. Cannot assign value from %s.\n", varName, rhsVarName)
+			return nil
+		}
+
+		t.addAsm("    // --- Start of assignment to %s from %s ---", varName, rhsVarName)
+		switch varType {
+		case TypeInt:
+			t.addAsm("    LDR X9, =%s", rhsMangledName) // Load address of RHS
+			t.addAsm("    LDR W11, [X9]")               // Load value from RHS
+			t.addAsm("    LDR X10, =%s", mangledName)    // Load address of LHS
+			t.addAsm("    STR W11, [X10]")               // Store value to LHS
+		case TypeBool:
+			t.addAsm("    LDR X9, =%s", rhsMangledName) // Load address of RHS
+			t.addAsm("    LDRB W11, [X9]")              // Load byte from RHS
+			t.addAsm("    LDR X10, =%s", mangledName)   // Load address of LHS
+			t.addAsm("    STRB W11, [X10]")             // Store byte to LHS
+		default:
+			fmt.Fprintf(os.Stderr, "Unsupported type for variable-to-variable assignment: %s\n", varType)
+			return nil
+		}
+		t.addAsm("    // --- End of assignment to %s from %s ---", varName, rhsVarName)
+		t.addAsm("")
+
+	// TODO: Add cases for other literal types like FloatLiteral, StringLiteral.
+	// TODO: Add cases for BinaryExpr (assignment from an arithmetic operation).
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unsupported R-value in assignment: %T\n", node.Right)
+		if node.Right != nil {
+			node.Right.Accept(t)
+		}
+	}
+
+	// We don't visit node.Left because we've already processed it to get the varName.
+	// Visiting it would be redundant or incorrect if it's not designed to be visited in this context.
+
 	return nil
 }
 
@@ -572,19 +734,21 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 func (t *Translator) handlePrintln(args []ast.Expression) {
 	t.needsPrintf = true
 	var formatParts []string
-	var argVars []string // Collects the names of variables that need to be loaded as arguments
+
+	type printArg struct {
+		mangledName string
+		varType     VarType
+	}
+	var printArgs []printArg
 
 	for i, arg := range args {
-		// V's println automatically adds spaces between arguments.
 		if i > 0 {
 			formatParts = append(formatParts, " ")
 		}
 
 		switch v := arg.(type) {
 		case *ast.StringLiteral:
-			// For string literals, we check for interpolation.
 			rawVal := v.Value
-			// The parser includes the quotes, so we strip them for processing.
 			if len(rawVal) >= 2 && rawVal[0] == '"' && rawVal[len(rawVal)-1] == '"' {
 				rawVal = rawVal[1 : len(rawVal)-1]
 			}
@@ -593,51 +757,52 @@ func (t *Translator) handlePrintln(args []ast.Expression) {
 			matches := re.FindAllStringSubmatchIndex(rawVal, -1)
 			lastIndex := 0
 			for _, match := range matches {
-				// Append the literal part of the string before the variable.
 				formatParts = append(formatParts, rawVal[lastIndex:match[0]])
-
-				// Get variable name and its type.
 				varName := rawVal[match[2]:match[3]]
-				varType := t.symbolTable[varName]
+				mangledName, varType, exists := t.lookupSymbol(varName)
+				if !exists {
+					fmt.Fprintf(os.Stderr, "Error: Use of undeclared variable '%s' in println.\n", varName)
+					formatParts = append(formatParts, "[UNDECLARED]")
+					continue
+				}
 
-				// Append the correct format specifier.
 				switch varType {
 				case TypeFloat:
 					formatParts = append(formatParts, "%f")
-				case TypeString, TypeBool: // Bools are printed as 'true'/'false' strings.
+				case TypeString, TypeBool:
 					formatParts = append(formatParts, "%s")
-				default: // TypeInt or TypeUnknown.
+				default:
 					formatParts = append(formatParts, "%d")
 				}
-
-				// Add variable to the list of arguments to load.
-				argVars = append(argVars, varName)
+				printArgs = append(printArgs, printArg{mangledName: mangledName, varType: varType})
 				lastIndex = match[1]
 			}
-			// Append the rest of the literal string.
 			formatParts = append(formatParts, rawVal[lastIndex:])
 
 		case *ast.IdentifierExpr:
-			// For a variable identifier, determine its type and add the right format specifier.
 			varName := v.Name
-			varType := t.symbolTable[varName]
+			mangledName, varType, exists := t.lookupSymbol(varName)
+			if !exists {
+				fmt.Fprintf(os.Stderr, "Error: Use of undeclared variable '%s' in println.\n", varName)
+				formatParts = append(formatParts, "[UNDECLARED]")
+				continue
+			}
+
 			switch varType {
 			case TypeFloat:
 				formatParts = append(formatParts, "%f")
 			case TypeString, TypeBool:
 				formatParts = append(formatParts, "%s")
-			default: // TypeInt, TypeUnknown
+			default:
 				formatParts = append(formatParts, "%d")
 			}
-			argVars = append(argVars, varName)
+			printArgs = append(printArgs, printArg{mangledName: mangledName, varType: varType})
 
 		default:
-			// Fallback for any other expression types.
 			formatParts = append(formatParts, "[?]")
 		}
 	}
 
-	// Add a newline at the end for `println`.
 	formatParts = append(formatParts, "\n")
 	formatString := strings.Join(formatParts, "")
 	formatLabel := t.addStringData(formatString)
@@ -645,23 +810,21 @@ func (t *Translator) handlePrintln(args []ast.Expression) {
 	t.addAsm("    // --- Start of println call ---")
 	t.addAsm("    LDR X0, =%s", formatLabel)
 
-	// Load arguments into registers based on their type.
-	intArgCount := 1   // General-purpose registers start at X1 (X0 is format string).
-	floatArgCount := 0 // Floating-point registers start at D0.
+	intArgCount := 1
+	floatArgCount := 0
 
-	for _, varName := range argVars {
-		varType := t.symbolTable[varName]
-		switch varType {
+	for _, arg := range printArgs {
+		switch arg.varType {
 		case TypeFloat:
 			if floatArgCount < 8 {
-				t.addAsm("    LDR X9, =%s", varName)
+				t.addAsm("    LDR X9, =%s", arg.mangledName)
 				t.addAsm("    LDR D%d, [X9]", floatArgCount)
 				floatArgCount++
 			}
 		case TypeString:
 			if intArgCount < 8 {
-				t.addAsm("    LDR X%d, =%s", intArgCount, varName)       // Load address of the pointer.
-				t.addAsm("    LDR X%d, [X%d]", intArgCount, intArgCount) // Dereference to get string address.
+				t.addAsm("    LDR X%d, =%s", intArgCount, arg.mangledName)
+				t.addAsm("    LDR X%d, [X%d]", intArgCount, intArgCount)
 				intArgCount++
 			}
 		case TypeBool:
@@ -669,37 +832,32 @@ func (t *Translator) handlePrintln(args []ast.Expression) {
 				trueLabel := t.addStringData("true")
 				falseLabel := t.addStringData("false")
 				argReg := fmt.Sprintf("X%d", intArgCount)
-				valReg := "W9"      // Temporary register for the bool value
-				trueAddrReg := "X10"  // Temp reg for "true" address
-				falseAddrReg := "X11" // Temp reg for "false" address
+				valReg := "W9"
+				trueAddrReg := "X10"
+				falseAddrReg := "X11"
 
-				// Load the addresses of the 'true' and 'false' strings into registers
 				t.addAsm("    LDR %s, =%s", trueAddrReg, trueLabel)
 				t.addAsm("    LDR %s, =%s", falseAddrReg, falseLabel)
-
-				// Load the boolean value itself
-				t.addAsm("    LDR X12, =%s", varName)    // Load address of bool var into another temp reg
-				t.addAsm("    LDRB %s, [X12]", valReg)   // Load byte value from address
+				t.addAsm("    LDR X12, =%s", arg.mangledName)
+				t.addAsm("    LDRB %s, [X12]", valReg)
 				t.addAsm("    CMP %s, #0", valReg)
-
-				// Conditionally select which string address to use for the printf argument
 				t.addAsm("    CSEL %s, %s, %s, EQ", argReg, falseAddrReg, trueAddrReg)
 				intArgCount++
 			}
 		default: // TypeInt, TypeUnknown
 			if intArgCount < 8 {
-				t.addAsm("    LDR X9, =%s", varName)
-				t.addAsm("    LDR W%d, [X9]", intArgCount) // Load integer value.
+				t.addAsm("    LDR X9, =%s", arg.mangledName)
+				t.addAsm("    LDR W%d, [X9]", intArgCount)
 				intArgCount++
 			}
 		}
 	}
 
 	t.addAsm("    BL printf")
-	t.addAsm("    // --- End of println call ---\n")
+	t.addAsm("    // --- End of println call ---")
+	t.addAsm("")
 }
 
-// Literals
 func (t *Translator) VisitIntegerLiteral(node *ast.IntegerLiteral) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting IntegerLiteral")

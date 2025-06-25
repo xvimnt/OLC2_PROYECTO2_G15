@@ -109,4 +109,47 @@ fn main() {
     mutable_inferred_bool = false // Should be allowed
     println("Modified mutable bool: $mutable_inferred_bool") // Expected: false
 
+    // Reassignment is allowed for mutable variables
+    explicit_int = 100
+    println("Reassigned int: $explicit_int") // Expected: 100
+
+    // Type mismatch on reassignment (commented out to prevent semantic error).
+    // explicit_int = "not an int" // SEMANTIC ERROR: Cannot assign string to int.
+
+    
+    // --------------------------------------------------
+    // Section D: Scope Rules and Shadowing
+    // --------------------------------------------------
+    println("\n--- D. Testing Scope Rules and Shadowing ---")
+    mut outer_scope_var int = 1
+    println("1. outer_scope_var in main scope:", outer_scope_var) // Expected: 1
+    println("2. Accessing global from main scope:", global_integer)  // Expected: 100
+
+    {
+        // First level of nesting
+        mut inner_scope_var int = 2
+        println("3. outer_scope_var inside block 1:", outer_scope_var) // Expected: 1
+        println("4. inner_scope_var inside block 1:", inner_scope_var) // Expected: 2
+
+        // Shadowing a variable from an outer scope
+        mut outer_scope_var int = 99 // This 'outer_scope_var' only exists here.
+        println("5. Shadowed outer_scope_var in block 1:", outer_scope_var) // Expected: 99
+        
+        {
+            // Second level of nesting
+            mut deepest_var bool = true
+            println("6. Accessing inner_scope_var from block 2:", inner_scope_var) // Expected: 2
+            println("7. Accessing shadowed var from block 2:", outer_scope_var) // Expected: 99 (accesses the one from block 1)
+        }
+        
+        // This would be a semantic error as `deepest_var` is out of scope.
+        // println(deepest_var) 
+    }
+
+    println("8. outer_scope_var back in main scope:", outer_scope_var) // Expected: 1 (shadowed variable is gone)
+    
+    // This would be a semantic error as `inner_scope_var` is out of scope.
+    // println(inner_scope_var) 
+
+    println("\n--- Test 1 Finished ---")
 }

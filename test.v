@@ -103,5 +103,10 @@ fn main() {
     println("Inferred string via ':=' $inferred_string")
     println("Inferred float via ':=' $inferred_float")
     
-   
+    // Type inference with `mut` keyword
+    mut mutable_inferred_bool := true
+    println("Inferred mutable bool via 'mut ... :=' $mutable_inferred_bool")
+    mutable_inferred_bool = false // Should be allowed
+    println("Modified mutable bool: $mutable_inferred_bool") // Expected: false
+
 }

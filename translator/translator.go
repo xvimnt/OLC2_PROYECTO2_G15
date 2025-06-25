@@ -229,6 +229,14 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 			// For global floats, we define them in the data section and store their type.
 			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double %s", varName, init.Value))
 			t.symbolTable[varName] = TypeFloat
+		case *ast.BoolLiteral:
+			// For global booleans, we define them as a byte.
+			val := "0"
+			if init.Value {
+				val = "1"
+			}
+			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .byte %s", varName, val))
+			t.symbolTable[varName] = TypeBool
 		default:
 			// Unhandled initializer type, default to 0
 			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
@@ -661,12 +669,21 @@ func (t *Translator) handlePrintln(args []ast.Expression) {
 				trueLabel := t.addStringData("true")
 				falseLabel := t.addStringData("false")
 				argReg := fmt.Sprintf("X%d", intArgCount)
-				valReg := "W9" // Temporary register for the bool value.
+				valReg := "W9"      // Temporary register for the bool value
+				trueAddrReg := "X10"  // Temp reg for "true" address
+				falseAddrReg := "X11" // Temp reg for "false" address
 
-				t.addAsm("    LDR X10, =%s", varName)  // Load address of bool var.
-				t.addAsm("    LDRB %s, [X10]", valReg) // Load byte value from address.
+				// Load the addresses of the 'true' and 'false' strings into registers
+				t.addAsm("    LDR %s, =%s", trueAddrReg, trueLabel)
+				t.addAsm("    LDR %s, =%s", falseAddrReg, falseLabel)
+
+				// Load the boolean value itself
+				t.addAsm("    LDR X12, =%s", varName)    // Load address of bool var into another temp reg
+				t.addAsm("    LDRB %s, [X12]", valReg)   // Load byte value from address
 				t.addAsm("    CMP %s, #0", valReg)
-				t.addAsm("    CSEL %s, %s, %s, EQ", argReg, falseLabel, trueLabel) // Select 'true' or 'false' string.
+
+				// Conditionally select which string address to use for the printf argument
+				t.addAsm("    CSEL %s, %s, %s, EQ", argReg, falseAddrReg, trueAddrReg)
 				intArgCount++
 			}
 		default: // TypeInt, TypeUnknown

@@ -34,6 +34,13 @@ inferred_string: .quad str17
 inferred_float: .double 3.14
 str18: .asciz "Inferred string via ':=' %s\n"
 str19: .asciz "Inferred float via ':=' %f\n"
+mutable_inferred_bool: .byte 1
+str20: .asciz "Inferred mutable bool via 'mut ... :=' %s\n"
+str21: .asciz "true"
+str22: .asciz "false"
+str23: .asciz "Modified mutable bool: %s\n"
+str24: .asciz "true"
+str25: .asciz "false"
 
 .extern printf
 .text
@@ -166,6 +173,28 @@ main:
     LDR X0, =str19
     LDR X9, =inferred_float
     LDR D0, [X9]
+    BL printf
+    // --- End of println call ---
+
+    // --- Start of println call ---
+    LDR X0, =str20
+    LDR X10, =str21
+    LDR X11, =str22
+    LDR X12, =mutable_inferred_bool
+    LDRB W9, [X12]
+    CMP W9, #0
+    CSEL X1, X11, X10, EQ
+    BL printf
+    // --- End of println call ---
+
+    // --- Start of println call ---
+    LDR X0, =str23
+    LDR X10, =str24
+    LDR X11, =str25
+    LDR X12, =mutable_inferred_bool
+    LDRB W9, [X12]
+    CMP W9, #0
+    CSEL X1, X11, X10, EQ
     BL printf
     // --- End of println call ---
 

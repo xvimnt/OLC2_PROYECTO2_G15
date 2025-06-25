@@ -100,18 +100,18 @@ fn main() {
     // Type inference using `:=`
     inferred_string := "This is a string"
     inferred_float := 3.14
-    println("Inferred string via ':='")
-    println("Inferred float via ':='")
+    println("Inferred string via ':=' $inferred_string")
+    println("Inferred float via ':=' $inferred_float")
     
     // Type inference with `mut` keyword
     mut mutable_inferred_bool := true
-    println("Inferred mutable bool via 'mut ... :='")
+    println("Inferred mutable bool via 'mut ... :=' $mutable_inferred_bool")
     mutable_inferred_bool = false // Should be allowed
-    println("Modified mutable bool:", mutable_inferred_bool) // Expected: false
+    println("Modified mutable bool: $mutable_inferred_bool") // Expected: false
 
     // Reassignment is allowed for mutable variables
     explicit_int = 100
-    println("Reassigned int:", explicit_int) // Expected: 100
+    println("Reassigned int: $explicit_int") // Expected: 100
 
     // Type mismatch on reassignment (commented out to prevent semantic error).
     // explicit_int = "not an int" // SEMANTIC ERROR: Cannot assign string to int.

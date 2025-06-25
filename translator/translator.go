@@ -992,15 +992,23 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 	case TypeBool:
 		resultReg := leftResult.Reg
 		switch node.Operator {
+		case "&&":
+			t.addAsm("    AND W%d, W%d, W%d", resultReg, leftResult.Reg, rightResult.Reg)
+			t.releaseIntRegister(rightResult.Reg)
+			return ExpressionResult{Reg: resultReg, Type: TypeBool}
+		case "||":
+			t.addAsm("    ORR W%d, W%d, W%d", resultReg, leftResult.Reg, rightResult.Reg)
+			t.releaseIntRegister(rightResult.Reg)
+			return ExpressionResult{Reg: resultReg, Type: TypeBool}
 		case "==", "!=":
-			t.addAsm("    CMP X%d, X%d", leftResult.Reg, rightResult.Reg)
+			t.addAsm("    CMP W%d, W%d", leftResult.Reg, rightResult.Reg)
 			cond := ""
 			if node.Operator == "==" {
 				cond = "EQ"
 			} else {
 				cond = "NE"
 			}
-			t.addAsm("    CSET X%d, %s", resultReg, cond)
+			t.addAsm("    CSET W%d, %s", resultReg, cond)
 			t.releaseIntRegister(rightResult.Reg)
 			return ExpressionResult{Reg: resultReg, Type: TypeBool}
 		default:
@@ -1122,6 +1130,13 @@ func (t *Translator) VisitUnaryExpr(node *ast.UnaryExpr) interface{} {
 	operandResult := node.Right.Accept(t).(ExpressionResult)
 
 	switch node.Operator {
+	case "!":
+		if operandResult.Type != TypeBool {
+			panic(fmt.Sprintf("Unsupported type for unary ! operator: %s", operandResult.Type))
+		}
+		// EOR with 1 flips the bit (0->1, 1->0)
+		t.addAsm("    EOR W%d, W%d, #1", operandResult.Reg, operandResult.Reg)
+		return operandResult
 	case "-":
 		switch operandResult.Type {
 		case TypeInt:
@@ -1183,6 +1198,12 @@ func (t *Translator) VisitIdentifierExpr(node *ast.IdentifierExpr) interface{} {
 		t.addAsm("    LDR X%d, [X%d]", valReg, addrReg)
 		t.releaseIntRegister(addrReg) // Free the address register.
 		return ExpressionResult{Reg: valReg, Type: TypeString}
+	case TypeBool:
+		valReg := t.acquireIntRegister()
+		// Load a byte from the address in addrReg.
+		t.addAsm("    LDRB W%d, [X%d]", valReg, addrReg)
+		t.releaseIntRegister(addrReg) // Free the address register.
+		return ExpressionResult{Reg: valReg, Type: TypeBool}
 	default:
 		t.releaseIntRegister(addrReg) // Release register even on panic
 		panic(fmt.Sprintf("Loading for type %s not implemented", varType))

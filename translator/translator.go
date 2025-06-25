@@ -52,6 +52,7 @@ type Translator struct {
 	scopeCounter       int
 	scopeIDStack       []int
 	stringCounter      int               // For generating unique string labels
+	labelCounter       int               // For generating unique labels
 	needsPrintf        bool              // Tracks if printf is used (for .extern printf)
 	hasIntFormatStr    bool              // Tracks if the integer format string has been added
 	hasFloatFormatStr  bool              // Tracks if the float format string has been added
@@ -82,6 +83,7 @@ func NewTranslator(debugMode bool) *Translator {
 		scopeCounter:       0,
 		scopeIDStack:       []int{0}, // Global scope ID
 		stringCounter:      0,
+		labelCounter:       0,
 		needsPrintf:        false,
 		hasIntFormatStr:    false,
 		hasFloatFormatStr:  false,
@@ -141,7 +143,7 @@ func (t *Translator) releaseFloatRegister(reg int) {
 	}
 }
 
-// addStringData adds a string to the .data section and returns its label.
+// addFloatData adds a float to the .data section and returns its label.
 func (t *Translator) addFloatData(floatStr string) string {
 	label := fmt.Sprintf("F%d", t.stringCounter)
 	t.stringCounter++
@@ -192,6 +194,17 @@ func (t *Translator) addStringData(strContent string) string {
 	t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .asciz %q", label, strContent))
 	t.stringCounter++
 	return label
+}
+
+// addData adds a line to the .data section of the assembly code.
+func (t *Translator) addData(line string) {
+	t.dataSection = append(t.dataSection, line)
+}
+
+// newLabel generates a new unique label with a given prefix.
+func (t *Translator) newLabel(prefix string) string {
+	t.labelCounter++
+	return fmt.Sprintf("%s%d", prefix, t.labelCounter)
 }
 
 // GetAssembly returns the generated assembly code.
@@ -542,42 +555,88 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 			}
 		}
 	case "+=":
-		if varType != TypeInt {
-			fmt.Fprintf(os.Stderr, "Type mismatch in compound assignment to %s. Expected Int.\n", varName)
-			return nil
-		}
-		// For now, assume RHS is an IntegerLiteral for simplicity
-		if rhs, ok := node.Right.(*ast.IntegerLiteral); ok {
+		switch varType {
+		case TypeInt:
+			if rhs, ok := node.Right.(*ast.IntegerLiteral); ok {
+				t.addAsm("    // --- Start of compound assignment (+=) to %s ---", varName)
+				t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
+				t.addAsm("    LDR W11, [X10]")           // Load current value of var
+				t.addAsm("    MOV W12, #%s", rhs.Value) // Load immediate integer value from RHS
+				t.addAsm("    ADD W11, W11, W12")        // Perform addition
+				t.addAsm("    STR W11, [X10]")           // Store result back
+				t.addAsm("    // --- End of compound assignment (+=) to %s ---", varName)
+				t.addAsm("")
+			} else {
+				fmt.Fprintf(os.Stderr, "Unsupported R-value in compound assignment for Int: %T\n", node.Right)
+			}
+		case TypeFloat:
 			t.addAsm("    // --- Start of compound assignment (+=) to %s ---", varName)
 			t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
-			t.addAsm("    LDR W11, [X10]")           // Load current value of var
-			t.addAsm("    MOV W12, #%s", rhs.Value) // Load immediate integer value from RHS
-			t.addAsm("    ADD W11, W11, W12")        // Perform addition
-			t.addAsm("    STR W11, [X10]")           // Store result back
+			t.addAsm("    LDR D8, [X10]")           // Load current value of var into float register D8
+			switch rhs := node.Right.(type) {
+			case *ast.IntegerLiteral:
+				t.addAsm("    MOV W11, #%s", rhs.Value) // Load immediate integer value
+				t.addAsm("    SCVTF D9, W11")           // Convert integer in W11 to float in D9
+				t.addAsm("    FADD D8, D8, D9")         // Perform float addition
+			case *ast.FloatLiteral:
+				floatLabel := t.newLabel("float")
+				t.addData(fmt.Sprintf("%s: .double %s", floatLabel, rhs.Value))
+				t.addAsm("    LDR X11, =%s", floatLabel) // Load address of float literal
+				t.addAsm("    LDR D9, [X11]")            // Load float literal into D9
+				t.addAsm("    FADD D8, D8, D9")          // Perform float addition
+			default:
+				fmt.Fprintf(os.Stderr, "Unsupported R-value in compound assignment for Float: %T\n", node.Right)
+				t.addAsm("    // --- Aborted compound assignment due to unsupported RHS ---")
+				return nil
+			}
+			t.addAsm("    STR D8, [X10]") // Store result back
 			t.addAsm("    // --- End of compound assignment (+=) to %s ---", varName)
 			t.addAsm("")
-		} else {
-			// TODO: Handle other RHS types like IdentifierExpr
-			fmt.Fprintf(os.Stderr, "Unsupported R-value in compound assignment: %T\n", node.Right)
-		}
-	case "-=":
-		if varType != TypeInt {
-			fmt.Fprintf(os.Stderr, "Type mismatch in compound assignment to %s. Expected Int.\n", varName)
+		default:
+			fmt.Fprintf(os.Stderr, "Unsupported type for compound assignment (+=): %s\n", varType)
 			return nil
 		}
-		// For now, assume RHS is an IntegerLiteral for simplicity
-		if rhs, ok := node.Right.(*ast.IntegerLiteral); ok {
+	case "-=":
+		switch varType {
+		case TypeInt:
+			if rhs, ok := node.Right.(*ast.IntegerLiteral); ok {
+				t.addAsm("    // --- Start of compound assignment (-=) to %s ---", varName)
+				t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
+				t.addAsm("    LDR W11, [X10]")           // Load current value of var
+				t.addAsm("    MOV W12, #%s", rhs.Value) // Load immediate integer value from RHS
+				t.addAsm("    SUB W11, W11, W12")        // Perform subtraction
+				t.addAsm("    STR W11, [X10]")           // Store result back
+				t.addAsm("    // --- End of compound assignment (-=) to %s ---", varName)
+				t.addAsm("")
+			} else {
+				fmt.Fprintf(os.Stderr, "Unsupported R-value in compound assignment for Int: %T\n", node.Right)
+			}
+		case TypeFloat:
 			t.addAsm("    // --- Start of compound assignment (-=) to %s ---", varName)
 			t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
-			t.addAsm("    LDR W11, [X10]")           // Load current value of var
-			t.addAsm("    MOV W12, #%s", rhs.Value) // Load immediate integer value from RHS
-			t.addAsm("    SUB W11, W11, W12")        // Perform subtraction
-			t.addAsm("    STR W11, [X10]")           // Store result back
+			t.addAsm("    LDR D8, [X10]")           // Load current value of var into float register D8
+			switch rhs := node.Right.(type) {
+			case *ast.IntegerLiteral:
+				t.addAsm("    MOV W11, #%s", rhs.Value) // Load immediate integer value
+				t.addAsm("    SCVTF D9, W11")           // Convert integer in W11 to float in D9
+				t.addAsm("    FSUB D8, D8, D9")         // Perform float subtraction
+			case *ast.FloatLiteral:
+				floatLabel := t.newLabel("float")
+				t.addData(fmt.Sprintf("%s: .double %s", floatLabel, rhs.Value))
+				t.addAsm("    LDR X11, =%s", floatLabel) // Load address of float literal
+				t.addAsm("    LDR D9, [X11]")            // Load float literal into D9
+				t.addAsm("    FSUB D8, D8, D9")          // Perform float subtraction
+			default:
+				fmt.Fprintf(os.Stderr, "Unsupported R-value in compound assignment for Float: %T\n", node.Right)
+				t.addAsm("    // --- Aborted compound assignment due to unsupported RHS ---")
+				return nil
+			}
+			t.addAsm("    STR D8, [X10]") // Store result back
 			t.addAsm("    // --- End of compound assignment (-=) to %s ---", varName)
 			t.addAsm("")
-		} else {
-			// TODO: Handle other RHS types like IdentifierExpr
-			fmt.Fprintf(os.Stderr, "Unsupported R-value in compound assignment: %T\n", node.Right)
+		default:
+			fmt.Fprintf(os.Stderr, "Unsupported type for compound assignment (-=): %s\n", varType)
+			return nil
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "Unsupported assignment operator: %s\n", node.Operator)
@@ -719,25 +778,48 @@ func (t *Translator) VisitIncDecStmt(node *ast.IncDecStmt) interface{} {
 		return nil
 	}
 
-	if varType != TypeInt {
-		fmt.Fprintf(os.Stderr, "Inc/dec on non-integer variable: %s\n", varName)
+	switch varType {
+	case TypeInt:
+		t.addAsm("    // --- Start of integer inc/dec on %s ---", varName)
+		t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
+		t.addAsm("    LDR W11, [X10]")           // Load current value of var
+
+		switch node.Operator {
+		case "++":
+			t.addAsm("    ADD W11, W11, #1") // Increment
+		case "--":
+			t.addAsm("    SUB W11, W11, #1") // Decrement
+		}
+
+		t.addAsm("    STR W11, [X10]") // Store result back
+		t.addAsm("    // --- End of integer inc/dec on %s ---", varName)
+		t.addAsm("")
+	case TypeFloat:
+		t.addAsm("    // --- Start of float inc/dec on %s ---", varName)
+		// Create a label for 1.0 in the data section.
+		oneLabel := t.newLabel("float_one")
+		t.addData(fmt.Sprintf("%s: .double 1.0", oneLabel))
+
+		t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
+		t.addAsm("    LDR D8, [X10]")           // Load current value of var
+
+		t.addAsm("    LDR X11, =%s", oneLabel)  // Load address of 1.0
+		t.addAsm("    LDR D9, [X11]")           // Load 1.0 into D9
+
+		switch node.Operator {
+		case "++":
+			t.addAsm("    FADD D8, D8, D9") // Increment
+		case "--":
+			t.addAsm("    FSUB D8, D8, D9") // Decrement
+		}
+
+		t.addAsm("    STR D8, [X10]") // Store result back
+		t.addAsm("    // --- End of float inc/dec on %s ---", varName)
+		t.addAsm("")
+	default:
+		fmt.Fprintf(os.Stderr, "Inc/dec on unsupported type for variable: %s (%s)\n", varName, varType)
 		return nil
 	}
-
-	t.addAsm("    // --- Start of %s operation on %s ---", node.Operator, varName)
-	t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
-	t.addAsm("    LDR W11, [X10]")           // Load current value of var
-
-	switch node.Operator {
-	case "++":
-		t.addAsm("    ADD W11, W11, #1") // Increment
-	case "--":
-		t.addAsm("    SUB W11, W11, #1") // Decrement
-	}
-
-	t.addAsm("    STR W11, [X10]") // Store result back
-	t.addAsm("    // --- End of %s operation on %s ---", node.Operator, varName)
-	t.addAsm("")
 
 	return nil
 }

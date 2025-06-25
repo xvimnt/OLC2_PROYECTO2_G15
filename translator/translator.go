@@ -592,8 +592,30 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 			t.addAsm("    STR D8, [X10]") // Store result back
 			t.addAsm("    // --- End of compound assignment (+=) to %s ---", varName)
 			t.addAsm("")
+		case TypeString:
+			t.needsStringHelpers = true // Ensure string helpers are included
+			// 1. Load the address of the variable that holds the string pointer
+			lhsAddrReg := t.acquireIntRegister()
+			t.addAsm("    LDR X%d, =%s", lhsAddrReg, mangledName)
+
+			// 2. Load the pointer to the string data (the LHS of +=)
+			lhsPtrReg := t.acquireIntRegister()
+			t.addAsm("    LDR X%d, [X%d]", lhsPtrReg, lhsAddrReg)
+
+			// 3. Evaluate the RHS expression
+			rhsResult := node.Right.Accept(t).(ExpressionResult)
+
+			// 4. Concatenate the strings
+			concatResult := t.concatenateStrings(ExpressionResult{Reg: lhsPtrReg, Type: TypeString}, rhsResult)
+
+			// 5. Store the new string's pointer back into the variable
+			t.addAsm("    STR X%d, [X%d]", concatResult.Reg, lhsAddrReg)
+
+			// 6. Release registers
+			t.releaseIntRegister(lhsAddrReg)
+			t.releaseIntRegister(concatResult.Reg) // This is the new string pointer
 		default:
-			fmt.Fprintf(os.Stderr, "Unsupported type for compound assignment (+=): %s\n", varType)
+			fmt.Fprintf(os.Stderr, "Unsupported type for compound assignment ('%s'): %s\n", node.Operator, varType)
 			return nil
 		}
 	case "-=":
@@ -1057,6 +1079,12 @@ func (t *Translator) VisitIdentifierExpr(node *ast.IdentifierExpr) interface{} {
 		t.addAsm("    LDR D%d, [X%d]", valReg, addrReg)
 		t.releaseIntRegister(addrReg) // Free the address register.
 		return ExpressionResult{Reg: valReg, Type: TypeFloat}
+	case TypeString:
+		valReg := t.acquireIntRegister()
+		// For strings, we load the pointer to the string data.
+		t.addAsm("    LDR X%d, [X%d]", valReg, addrReg)
+		t.releaseIntRegister(addrReg) // Free the address register.
+		return ExpressionResult{Reg: valReg, Type: TypeString}
 	default:
 		t.releaseIntRegister(addrReg) // Release register even on panic
 		panic(fmt.Sprintf("Loading for type %s not implemented", varType))

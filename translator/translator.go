@@ -204,6 +204,22 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 			// For global integers, we define them in the data section and store their type.
 			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word %s", varName, init.Value))
 			t.symbolTable[varName] = TypeInt
+		case *ast.UnaryExpr:
+			// Handle unary expressions, e.g., negative numbers
+			if init.Operator == "-" {
+				if intLit, ok := init.Right.(*ast.IntegerLiteral); ok {
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word -%s", varName, intLit.Value))
+					t.symbolTable[varName] = TypeInt
+				} else {
+					// Unhandled unary expression operand, default to 0
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
+					t.symbolTable[varName] = TypeUnknown
+				}
+			} else {
+				// Unhandled unary operator, default to 0
+				t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .word 0", varName))
+				t.symbolTable[varName] = TypeUnknown
+			}
 		case *ast.StringLiteral:
 			// For global strings, we store the string, and the variable holds its address.
 			strLabel := t.addStringData(init.Value)

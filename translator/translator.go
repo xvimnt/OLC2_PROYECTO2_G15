@@ -68,6 +68,10 @@ type Translator struct {
 	// Register allocation
 	intRegs   []bool // Availability of general-purpose integer registers (X9-X15)
 	floatRegs []bool // Availability of general-purpose float registers (D8-D15)
+
+	// Loop context
+	breakLabels    []string // Stack of labels for 'break' statements
+	continueLabels []string // Stack of labels for 'continue' statements
 }
 
 const (
@@ -631,7 +635,12 @@ func (t *Translator) VisitBreakStmt(node *ast.BreakStmt) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting BreakStmt")
 	}
-	// TODO: Implement BreakStmt translation
+	if len(t.breakLabels) == 0 {
+		panic("break statement outside of loop or switch")
+	}
+	// Jump to the current loop's exit label
+	breakLabel := t.breakLabels[len(t.breakLabels)-1]
+	t.addAsm("    B %s", breakLabel)
 	return nil
 }
 
@@ -639,7 +648,12 @@ func (t *Translator) VisitContinueStmt(node *ast.ContinueStmt) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting ContinueStmt")
 	}
-	// TODO: Implement ContinueStmt translation
+	if len(t.continueLabels) == 0 {
+		panic("continue statement outside of loop")
+	}
+	// Jump to the current loop's post-statement label
+	continueLabel := t.continueLabels[len(t.continueLabels)-1]
+	t.addAsm("    B %s", continueLabel)
 	return nil
 }
 
@@ -876,17 +890,60 @@ func (t *Translator) VisitForStmt(node *ast.ForStmt) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting ForStmt")
 	}
-	// TODO: Implement ForStmt translation (e.g., loop setup, jumps)
+
+	loopStartLabel := t.newLabel("loop_start")
+	loopBodyLabel := t.newLabel("loop_body")
+	loopPostLabel := t.newLabel("loop_post") // For 'continue'
+	loopEndLabel := t.newLabel("loop_end")   // For 'break'
+
+	// Push labels onto the stacks for break/continue statements within this loop
+	t.breakLabels = append(t.breakLabels, loopEndLabel)
+	t.continueLabels = append(t.continueLabels, loopPostLabel)
+
+	t.enterScope()
+
+	// 1. Initialization
 	if node.Init != nil {
 		node.Init.Accept(t)
 	}
+
+	// 2. Loop Start / Condition Check
+	t.addAsm("%s:", loopStartLabel)
 	if node.Condition != nil {
-		node.Condition.Accept(t)
+		condResult := node.Condition.Accept(t).(ExpressionResult)
+		t.addAsm("    // For loop condition check")
+		t.addAsm("    CMP W%d, #0", condResult.Reg) // Check if the condition is false
+		t.addAsm("    B.EQ %s", loopEndLabel)      // If false, exit loop
+		t.releaseIntRegister(condResult.Reg)
+	} else {
+		// Infinite loop `for {}` - no condition, so we jump straight to the body
+		// but we still need a way to get from the post-statement back here.
 	}
+
+	// Jump to body, this can be optimized out if body is next
+	t.addAsm("    B %s", loopBodyLabel)
+
+	// 4. Post-loop statement (for continue)
+	t.addAsm("%s:", loopPostLabel)
 	if node.Post != nil {
 		node.Post.Accept(t)
 	}
+	t.addAsm("    B %s", loopStartLabel) // Jump back to the condition check
+
+	// 3. Body of the loop
+	t.addAsm("%s:", loopBodyLabel)
 	node.Body.Accept(t)
+	t.addAsm("    B %s", loopPostLabel) // After body, execute post-statement
+
+	// 5. End of the loop
+	t.addAsm("%s:", loopEndLabel)
+
+	t.exitScope()
+
+	// Pop labels from the stacks
+	t.breakLabels = t.breakLabels[:len(t.breakLabels)-1]
+	t.continueLabels = t.continueLabels[:len(t.continueLabels)-1]
+
 	return nil
 }
 
@@ -1416,110 +1473,97 @@ func (t *Translator) VisitFieldAccessExpr(node *ast.FieldAccessExpr) interface{}
 
 func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting CallExpr")
-	}
-
-	// Check for the special 'println' function
-	if ident, ok := node.Function.(*ast.IdentifierExpr); ok && ident.Name == "println" {
-		if t.DebugMode {
+		if ident, ok := node.Function.(*ast.IdentifierExpr); ok {
 			fmt.Printf("Translator.VisitCallExpr: Visiting call to identifier: '%s'\n", ident.Name)
+		} else {
+			fmt.Println("Translator.VisitCallExpr: Visiting complex call expression")
 		}
-		t.needsPrintf = true
-		t.addAsm("    // --- Start of println call ---")
-		t.handlePrintln(node.Arguments)
-		t.addAsm("    // --- End of println call ---")
-		return nil // println does not return a value
 	}
 
-	// --- General Function Call ---
 	ident, ok := node.Function.(*ast.IdentifierExpr)
 	if !ok {
 		// For now, we only handle direct function calls like `myFunc()`
 		panic("Unhandled function call type")
 	}
+	funcName := ident.Name
 
-	if t.DebugMode {
-		fmt.Printf("Translator.VisitCallExpr: Visiting call to identifier: '%s'\n", ident.Name)
+	// Handle special built-in functions
+	switch funcName {
+	case "println", "print":
+		t.needsPrintf = true
+		t.addAsm("    // --- Start of %s call ---", funcName)
+		t.handlePrintln(node.Arguments)
+		t.addAsm("    // --- End of %s call ---", funcName)
+		return nil // println does not return a value
 	}
 
-	// 1. Evaluate arguments and move them to argument registers
-	intArgRegs := []string{"X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7"}
-	floatArgRegs := []string{"D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7"}
-	intArgCount := 0
-	floatArgCount := 0
+	// --- General Function Call for user-defined functions ---
+	funcDef, exists := t.funcSyms[funcName]
+	if !exists {
+		panic(fmt.Sprintf("Call to undefined function: %s", funcName))
+	}
 
-	var usedArgRegsInt []int
-	var usedArgRegsFloat []int
+	// Check if the number of arguments matches the function definition
+	if len(node.Arguments) != len(funcDef.Parameters) {
+		panic(fmt.Sprintf("Incorrect number of arguments for function %s: expected %d, got %d", funcName, len(funcDef.Parameters), len(node.Arguments)))
+	}
 
-	for _, arg := range node.Arguments {
-		result := arg.Accept(t)
-		argResult, isExprResult := result.(ExpressionResult)
-		if !isExprResult {
-			panic(fmt.Sprintf("Argument to function %s did not evaluate to an ExpressionResult", ident.Name))
-		}
+	// --- Argument Passing ---
+	// Per ARM64 calling convention, first 8 integer/pointer args are in X0-X7,
+	// and first 8 float args are in D0-D7.
+	t.addAsm("    // --- Start of call to %s ---", funcName)
 
-		switch argResult.Type {
-		case TypeInt, TypeString, TypeBool:
-			if intArgCount < len(intArgRegs) {
-				t.addAsm(fmt.Sprintf("    MOV %s, X%d", intArgRegs[intArgCount], argResult.Reg))
-				usedArgRegsInt = append(usedArgRegsInt, argResult.Reg)
-				intArgCount++
+	intArgReg := 0
+	floatArgReg := 0
+
+	for i, arg := range node.Arguments {
+		paramType := t.typeNodeToVarType(funcDef.Parameters[i].Type)
+		argResult := arg.Accept(t).(ExpressionResult)
+
+		switch paramType {
+		case TypeInt, TypeBool, TypeString: // Strings are pointers
+			if intArgReg < 8 {
+				t.addAsm("    MOV X%d, X%d  // Move arg %d for %s", intArgReg, argResult.Reg, i, funcName)
+				intArgReg++
 			} else {
-				t.releaseIntRegister(argResult.Reg) // Release if we can't pass it
+				// TODO: Handle stack-passed arguments
 			}
 		case TypeFloat:
-			if floatArgCount < len(floatArgRegs) {
-				t.addAsm(fmt.Sprintf("    FMOV %s, D%d", floatArgRegs[floatArgCount], argResult.Reg))
-				usedArgRegsFloat = append(usedArgRegsFloat, argResult.Reg)
-				floatArgCount++
+			if floatArgReg < 8 {
+				t.addAsm("    FMOV D%d, D%d // Move arg %d for %s", floatArgReg, argResult.Reg, i, funcName)
+				floatArgReg++
 			} else {
-				t.releaseFloatRegister(argResult.Reg) // Release if we can't pass it
+				// TODO: Handle stack-passed float arguments
 			}
+		}
+		// Release the register used by the argument expression now that it's moved
+		if argResult.Type == TypeFloat {
+			t.releaseFloatRegister(argResult.Reg)
+		} else {
+			t.releaseIntRegister(argResult.Reg)
 		}
 	}
 
-	// Release registers used for arguments now that they've been moved
-	for _, reg := range usedArgRegsInt {
-		t.releaseIntRegister(reg)
-	}
-	for _, reg := range usedArgRegsFloat {
-		t.releaseFloatRegister(reg)
-	}
+	t.addAsm("    BL %s", funcName)
+	t.addAsm("    // --- End of call to %s ---", funcName)
 
-	// 2. Emit the call instruction
-	t.addAsm(fmt.Sprintf("    BL %s", ident.Name))
-
-	// 3. Handle the return value
-	funcInfo, exists := t.funcSyms[ident.Name]
-	if !exists {
-		panic(fmt.Sprintf("Call to undefined function: %s", ident.Name))
-	}
-
-	returnType := t.typeNodeToVarType(funcInfo.ReturnType)
-
-	if returnType == TypeVoid {
-		return nil
+	// --- Return Value ---
+	// The return value will be in X0 (for int/ptr) or D0 (for float).
+	// We need to move it to a temporary register from our pool.
+	returnType := t.typeNodeToVarType(funcDef.ReturnType)
+	if returnType != TypeVoid {
+		var resultReg int
+		if returnType == TypeFloat {
+			resultReg = t.acquireFloatRegister()
+			t.addAsm("    FMOV D%d, D0", resultReg)
+		} else {
+			resultReg = t.acquireIntRegister()
+			t.addAsm("    MOV X%d, X0", resultReg)
+		}
+		return ExpressionResult{Reg: resultReg, Type: returnType}
 	}
 
-	var resultReg int
-	switch returnType {
-	case TypeInt, TypeString, TypeBool:
-		resultReg = t.acquireIntRegister()
-		t.addAsm(fmt.Sprintf("    MOV X%d, X0", resultReg))
-	case TypeFloat:
-		resultReg = t.acquireFloatRegister()
-		t.addAsm(fmt.Sprintf("    FMOV D%d, D0", resultReg))
-	default:
-		// For other types (arrays, structs), the address is returned in X0.
-		// We treat it as an integer-sized register for now.
-		resultReg = t.acquireIntRegister()
-		t.addAsm(fmt.Sprintf("    MOV X%d, X0", resultReg))
-	}
-
-	return ExpressionResult{
-		Reg:  resultReg,
-		Type: returnType,
-	}
+	return nil // No value for void functions
 }
 
 // typeNodeToVarType converts an ast.TypeNode to a VarType.
@@ -1831,7 +1875,8 @@ func (t *Translator) VisitAnonymousStructTypeNode(node *ast.AnonymousStructTypeN
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting AnonymousStructTypeNode")
 	}
-	// TODO: Implement AnonymousStructTypeNode translation
+	// TODO: Implement proper handling for anonymous struct types
+	// For now, treat it as an unknown/unsupported type for translation
 	for _, field := range node.Fields {
 		field.Accept(t)
 	}
@@ -1842,10 +1887,7 @@ func (t *Translator) VisitAnonymousInterfaceTypeNode(node *ast.AnonymousInterfac
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting AnonymousInterfaceTypeNode")
 	}
-	// TODO: Implement AnonymousInterfaceTypeNode translation
-	for _, method := range node.Methods {
-		method.Accept(t)
-	}
+	// TODO: Implement proper handling for anonymous interface types
 	return nil
 }
 

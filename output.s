@@ -1,95 +1,58 @@
 .data
+i_2: .quad 0
 .align 2
-str0: .asciz "jurassic"
-fruit_2: .quad 0
-.align 2
-str1: .asciz "banana"
-.align 2
-str2: .asciz "apple"
-.align 2
-str3: .asciz "orange"
-.align 2
-str4: .asciz "It's yellow.\n"
-.align 2
-str5: .asciz "It's red or green.\n"
-.align 2
-str6: .asciz "It's orange.\n"
-.align 2
-str7: .asciz "It's some other fruit.\n"
+str0: .asciz "%d\n"
 
-.extern strcmp
 .extern printf
 .text
 .global main
 main:
     STP X29, X30, [SP, #-16]!
     MOV X29, SP
-    LDR X9, =str0
-    // Storing initializer for fruit
-    LDR X10, =fruit_2
-    STR X9, [X10]
-    LDR X9, =fruit_2
-    LDR X10, [X9]
-    // --- Switch Statement ---
-    LDR X9, =str1
-    // Comparing with case: StringLiteral: "banana"
-    SUB SP, SP, #16
-    STR X10, [SP]
-    MOV X0, X10
-    MOV X1, X9
-    BL strcmp
-    LDR X10, [SP]
-    ADD SP, SP, #16
-    CMP W0, #0
-    BEQ switch_case_03
-    LDR X9, =str2
-    // Comparing with case: StringLiteral: "apple"
-    SUB SP, SP, #16
-    STR X10, [SP]
-    MOV X0, X10
-    MOV X1, X9
-    BL strcmp
-    LDR X10, [SP]
-    ADD SP, SP, #16
-    CMP W0, #0
-    BEQ switch_case_14
-    LDR X9, =str3
-    // Comparing with case: StringLiteral: "orange"
-    SUB SP, SP, #16
-    STR X10, [SP]
-    MOV X0, X10
-    MOV X1, X9
-    BL strcmp
-    LDR X10, [SP]
-    ADD SP, SP, #16
-    CMP W0, #0
-    BEQ switch_case_25
-    B switch_default2
-    // --- Switch Case Bodies ---
-switch_case_03:
-    // --- Start of println call ---
-    LDR X0, =str4
+    MOV X9, #0
+    // Storing initializer for i
+    LDR X10, =i_2
+    STR W9, [X10]
+loop_start1:
+    LDR X9, =i_2
+    LDRSW X10, [X9]
+    MOV X9, #5
+    CMP W10, W9
+    CSET W10, LT
+    // For loop condition check
+    CMP W10, #0
+    B.EQ loop_end4
+    B loop_body2
+loop_post3:
+    B loop_start1
+loop_body2:
+    LDR X9, =i_2
+    LDRSW X10, [X9]
+    MOV X9, #1
+    ADD X10, X10, X9
+    // Storing value for assignment to i
+    LDR X9, =i_2
+    STR W10, [X9]
+    LDR X9, =i_2
+    LDRSW X10, [X9]
+    MOV X9, #3
+    CMP W10, W9
+    CSET W10, EQ
+    // If statement condition check
+    CMP W10, #0
+    B.EQ .Lendif6
+    // 'Then' block
+    B loop_post3
+.Lendif6:
+    // --- Start of print call ---
+    LDR X9, =i_2
+    LDRSW X10, [X9]
+    LDR X0, =str0
+    MOV X1, X10
     BL printf
-    // --- End of println call ---
-    B switch_end1
-switch_case_14:
-    // --- Start of println call ---
-    LDR X0, =str5
-    BL printf
-    // --- End of println call ---
-    B switch_end1
-switch_case_25:
-    // --- Start of println call ---
-    LDR X0, =str6
-    BL printf
-    // --- End of println call ---
-    B switch_end1
-switch_default2:
-    // --- Start of println call ---
-    LDR X0, =str7
-    BL printf
-    // --- End of println call ---
-switch_end1:
+    // --- End of print call ---
+    B loop_post3
+loop_end4:
 .Lmain_epilogue:
     MOV W0, #0
     LDP X29, X30, [SP], #16

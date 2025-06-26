@@ -469,19 +469,21 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 
 	// Store the result from the register into the variable's memory location
 	t.addAsm("    // Storing initializer for %s", node.Name.Name)
-	t.addAsm("    LDR X9, =%s", mangledName) // Load address of variable into X9
+	addrReg := t.acquireIntRegister()
+	t.addAsm("    LDR X%d, =%s", addrReg, mangledName) // Load address of variable into a temporary register
 
 	switch res.Type {
 	case TypeInt, TypeBool:
-		t.addAsm("    STR W%d, [X9]", res.Reg) // Store from W-register
+		t.addAsm("    STR W%d, [X%d]", res.Reg, addrReg) // Store from W-register
 		t.releaseIntRegister(res.Reg)
 	case TypeFloat:
-		t.addAsm("    STR D%d, [X9]", res.Reg) // Store from D-register
+		t.addAsm("    STR D%d, [X%d]", res.Reg, addrReg) // Store from D-register
 		t.releaseFloatRegister(res.Reg)
 	case TypeString:
-		t.addAsm("    STR X%d, [X9]", res.Reg) // Store from X-register (pointer)
+		t.addAsm("    STR X%d, [X%d]", res.Reg, addrReg) // Store from X-register (pointer)
 		t.releaseIntRegister(res.Reg)
 	}
+	t.releaseIntRegister(addrReg)
 
 	return nil
 }

@@ -166,8 +166,8 @@ main:
 .Lendif8:
     MOV X9, #99
     // Storing value for assignment to entero
-    LDR X9, =entero_2
-    STR W9, [X9]
+    LDR X10, =entero_2
+    STR W9, [X10]
     LDR X9, =entero_2
     LDRSW X10, [X9]
     MOV X9, #99

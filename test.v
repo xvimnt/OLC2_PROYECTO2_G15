@@ -1,12 +1,12 @@
 fn main() {
-	mut puntos := 0
+	mut puntos = 0
 	println("=== Prueba Básica Simplificada ===")
 
 	// 1. Declaración de variables
-	mut entero := 42
-	mut decimal := 3.14
-	mut texto := "Hola, mundo!"
-	mut booleano := true
+	mut entero = 42
+	mut decimal = 3.14
+	mut texto = "Hola, mundo!"
+	mut booleano = true
 
 	if entero == 42 {
 		println("OK entero")
@@ -36,13 +36,13 @@ fn main() {
 	}
 
 	// 3. Aritmética
-	mut suma := 10 + 5
+	mut suma = 10 + 5
 	if suma == 15 {
 		println("OK suma")
 		puntos += 1
 	}
 
-	mut resta := 10 - 5
+	mut resta = 10 - 5
 	if resta == 5 {
 		println("OK resta")
 		puntos += 1
@@ -71,5 +71,5 @@ fn main() {
 	println(true)
 
 	// Resultado final
-	println("Puntos obtenidos: $puntos / 11")
+	println("Puntos obtenidos: $puntos / 10")
 }

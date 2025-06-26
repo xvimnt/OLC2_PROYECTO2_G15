@@ -581,8 +581,10 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 			}
 		}
 
+		// Acquire a dedicated register for the address to avoid clobbering the value register.
+		addrReg := t.acquireIntRegister()
 		t.addAsm("    // Storing value for assignment to %s", varName.Name)
-		t.addAsm("    LDR X9, =%s", mangledName) // Load address of variable into X9
+		t.addAsm("    LDR X%d, =%s", addrReg, mangledName) // Load address of variable into addrReg
 
 		// Handle type promotion if necessary (int to float)
 		if varType == TypeFloat && res.Type == TypeInt {
@@ -593,17 +595,21 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 			res = ExpressionResult{Reg: promotedFloatReg, Type: TypeFloat}
 		}
 
+		// Store the result from the register into the variable's memory location
 		switch res.Type {
 		case TypeInt, TypeBool:
-			t.addAsm("    STR W%d, [X9]", res.Reg)
+			t.addAsm("    STR W%d, [X%d]", res.Reg, addrReg)
 			t.releaseIntRegister(res.Reg)
 		case TypeFloat:
-			t.addAsm("    STR D%d, [X9]", res.Reg)
+			t.addAsm("    STR D%d, [X%d]", res.Reg, addrReg)
 			t.releaseFloatRegister(res.Reg)
 		case TypeString:
-			t.addAsm("    STR X%d, [X9]", res.Reg)
+			t.addAsm("    STR X%d, [X%d]", res.Reg, addrReg)
 			t.releaseIntRegister(res.Reg)
 		}
+
+		// Release the address register
+		t.releaseIntRegister(addrReg)
 	} else { // Compound assignment operators
 		// 1. Get the variable name from the left side (LHS)
 		varName, ok := node.Left.(*ast.IdentifierExpr)

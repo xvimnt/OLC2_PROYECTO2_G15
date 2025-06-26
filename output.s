@@ -1,14 +1,21 @@
 .data
-logged_in_2: .quad 0
 .align 2
-str0: .asciz "admin"
-user_role_2: .quad 0
+str0: .asciz "jurassic"
+fruit_2: .quad 0
 .align 2
-str1: .asciz "admin"
+str1: .asciz "banana"
 .align 2
-str2: .asciz "moderator"
+str2: .asciz "apple"
 .align 2
-str3: .asciz "Access level: Privileged\n"
+str3: .asciz "orange"
+.align 2
+str4: .asciz "It's yellow.\n"
+.align 2
+str5: .asciz "It's red or green.\n"
+.align 2
+str6: .asciz "It's orange.\n"
+.align 2
+str7: .asciz "It's some other fruit.\n"
 
 .extern strcmp
 .extern printf
@@ -17,59 +24,72 @@ str3: .asciz "Access level: Privileged\n"
 main:
     STP X29, X30, [SP, #-16]!
     MOV X29, SP
-    MOV X9, #1
-    // Storing initializer for logged_in
-    LDR X10, =logged_in_2
-    STR W9, [X10]
     LDR X9, =str0
-    // Storing initializer for user_role
-    LDR X10, =user_role_2
+    // Storing initializer for fruit
+    LDR X10, =fruit_2
     STR X9, [X10]
-    LDR X10, =logged_in_2
-    LDRB W11, [X10]
-    // Short-circuit AND: check left operand
-    CMP W11, #0
-    B.EQ .L_logic_false4
-    LDR X11, =user_role_2
-    LDR X12, [X11]
-    LDR X11, =str1
-    MOV X0, X12
-    MOV X1, X11
+    LDR X9, =fruit_2
+    LDR X10, [X9]
+    // --- Switch Statement ---
+    LDR X9, =str1
+    // Comparing with case: StringLiteral: "banana"
+    SUB SP, SP, #16
+    STR X10, [SP]
+    MOV X0, X10
+    MOV X1, X9
     BL strcmp
+    LDR X10, [SP]
+    ADD SP, SP, #16
     CMP W0, #0
-    CSET W13, EQ
-    // Short-circuit OR: check left operand
-    CMP W13, #0
-    B.NE .L_logic_true6
-    LDR X11, =user_role_2
-    LDR X12, [X11]
-    LDR X11, =str2
-    MOV X0, X12
-    MOV X1, X11
+    BEQ switch_case_03
+    LDR X9, =str2
+    // Comparing with case: StringLiteral: "apple"
+    SUB SP, SP, #16
+    STR X10, [SP]
+    MOV X0, X10
+    MOV X1, X9
     BL strcmp
+    LDR X10, [SP]
+    ADD SP, SP, #16
     CMP W0, #0
-    CSET W13, EQ
-    // Left was false, result is right operand
-    MOV W10, W13
-    B .L_logic_end5
-.L_logic_true6:
-    MOV W10, #1
-.L_logic_end5:
-    // Left was true, result is right operand
-    MOV W9, W10
-    B .L_logic_end3
-.L_logic_false4:
-    MOV W9, #0
-.L_logic_end3:
-    // If statement condition check
-    CMP W9, #0
-    B.EQ .Lendif2
-    // 'Then' block
+    BEQ switch_case_14
+    LDR X9, =str3
+    // Comparing with case: StringLiteral: "orange"
+    SUB SP, SP, #16
+    STR X10, [SP]
+    MOV X0, X10
+    MOV X1, X9
+    BL strcmp
+    LDR X10, [SP]
+    ADD SP, SP, #16
+    CMP W0, #0
+    BEQ switch_case_25
+    B switch_default2
+    // --- Switch Case Bodies ---
+switch_case_03:
     // --- Start of println call ---
-    LDR X0, =str3
+    LDR X0, =str4
     BL printf
     // --- End of println call ---
-.Lendif2:
+    B switch_end1
+switch_case_14:
+    // --- Start of println call ---
+    LDR X0, =str5
+    BL printf
+    // --- End of println call ---
+    B switch_end1
+switch_case_25:
+    // --- Start of println call ---
+    LDR X0, =str6
+    BL printf
+    // --- End of println call ---
+    B switch_end1
+switch_default2:
+    // --- Start of println call ---
+    LDR X0, =str7
+    BL printf
+    // --- End of println call ---
+switch_end1:
 .Lmain_epilogue:
     MOV W0, #0
     LDP X29, X30, [SP], #16

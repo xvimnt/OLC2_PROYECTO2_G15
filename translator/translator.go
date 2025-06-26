@@ -765,42 +765,111 @@ func (t *Translator) VisitSwitchStmt(node *ast.SwitchStmt) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting SwitchStmt")
 	}
-	// TODO: Implement SwitchStmt translation
-	if node.Expression != nil {
-		node.Expression.Accept(t)
-	}
-	for _, c := range node.Cases {
-		c.Accept(t)
-	}
+
+	endSwitchLabel := t.newLabel("switch_end")
+	var defaultLabel string
 	if node.Default != nil {
-		node.Default.Accept(t)
+		defaultLabel = t.newLabel("switch_default")
+	} else {
+		defaultLabel = endSwitchLabel // If no default, jump to the end
 	}
+
+	// 1. Evaluate the switch expression
+	if node.Expression == nil {
+		// This case (e.g., `switch {}`) is not handled.
+		// The parser should enforce that an expression is present.
+		return nil
+	}
+	switchExprResult := node.Expression.Accept(t).(ExpressionResult)
+
+	// 2. Generate labels for each case body
+	caseLabels := make([]string, len(node.Cases))
+	for i := range node.Cases {
+		caseLabels[i] = t.newLabel(fmt.Sprintf("switch_case_%d", i))
+	}
+
+	// 3. Generate comparison logic
+	t.addAsm("    // --- Switch Statement ---")
+	for i, caseClause := range node.Cases {
+		for _, expr := range caseClause.Expressions {
+			caseExprResult := expr.Accept(t).(ExpressionResult)
+
+			// A more robust implementation would check switchExprResult.Type.
+			if switchExprResult.Type == TypeString {
+				t.needsStrcmp = true
+				t.addAsm("    // Comparing with case: %s", expr.String())
+
+				// Save the switch expression register because BL will clobber it
+				t.addAsm("    SUB SP, SP, #16")
+				t.addAsm("    STR X%d, [SP]", switchExprResult.Reg)
+
+				// Set up args for strcmp
+				t.addAsm("    MOV X0, X%d", switchExprResult.Reg)
+				t.addAsm("    MOV X1, X%d", caseExprResult.Reg)
+
+				t.addAsm("    BL strcmp")
+
+				// Restore the switch expression register
+				t.addAsm("    LDR X%d, [SP]", switchExprResult.Reg)
+				t.addAsm("    ADD SP, SP, #16")
+
+				t.addAsm("    CMP W0, #0") // strcmp returns 0 on match
+				t.addAsm("    BEQ %s", caseLabels[i])
+
+			} else { // Assuming integer comparison for other types
+				t.addAsm("    // Comparing with case: %s", expr.String())
+				// switchExprResult.Reg holds the integer value.
+				// caseExprResult.Reg holds the case integer value.
+				t.addAsm("    CMP W%d, W%d", switchExprResult.Reg, caseExprResult.Reg)
+				t.addAsm("    BEQ %s", caseLabels[i])
+			}
+			t.releaseIntRegister(caseExprResult.Reg)
+		}
+	}
+
+	// 4. If no cases match, jump to default
+	t.addAsm("    B %s", defaultLabel)
+
+	// 5. Generate code for case bodies
+	t.addAsm("    // --- Switch Case Bodies ---")
+	for i, caseClause := range node.Cases {
+		t.addAsm("%s:", caseLabels[i])
+		for _, stmt := range caseClause.Body {
+			stmt.Accept(t)
+		}
+		t.addAsm("    B %s", endSwitchLabel) // Jump to end after case body
+	}
+
+	// 6. Generate code for default body
+	t.addAsm("%s:", defaultLabel)
+	if node.Default != nil {
+		for _, stmt := range node.Default.Body {
+			stmt.Accept(t)
+		}
+	}
+
+	// 7. End of switch
+	t.addAsm("%s:", endSwitchLabel)
+	t.releaseIntRegister(switchExprResult.Reg)
+
 	return nil
 }
 
 func (t *Translator) VisitCaseClause(node *ast.CaseClause) interface{} {
+	// This is now handled entirely within VisitSwitchStmt.
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting CaseClause")
-	}
-	// TODO: Implement CaseClause translation
-	for _, expr := range node.Expressions {
-		expr.Accept(t)
-	}
-	for _, stmt := range node.Body {
-		stmt.Accept(t)
+		fmt.Println("Translator.Visiting CaseClause (should be handled by SwitchStmt)")
 	}
 	return nil
 }
 
 func (t *Translator) VisitDefaultClause(node *ast.DefaultClause) interface{} {
+	// This is now handled entirely within VisitSwitchStmt.
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting DefaultClause")
-	}
-	// TODO: Implement DefaultClause translation
-	for _, stmt := range node.Body {
-		stmt.Accept(t)
+		fmt.Println("Translator.Visiting DefaultClause (should be handled by SwitchStmt)")
 	}
 	return nil
+
 }
 
 func (t *Translator) VisitForStmt(node *ast.ForStmt) interface{} {

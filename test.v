@@ -1,10 +1,13 @@
 fn main() {
-    mut logged_in bool = true
-    mut user_role string = "admin"
-    if logged_in && (user_role == "admin" || user_role == "moderator") {
-        println("Access level: Privileged") // Expected
-        if user_role == "admin" {
-            println("Admin panel access granted.") // Expected
-        }
+    mut fruit string = "jurassic"
+    switch fruit {
+        case "banana":
+            println("It's yellow.")
+        case "apple":
+            println("It's red or green.") // Expected. Implicit break prevents fall-through.
+        case "orange":
+            println("It's orange.")
+        default:
+            println("It's some other fruit.")
     }
 } 

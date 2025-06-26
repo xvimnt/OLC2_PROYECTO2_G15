@@ -45,8 +45,8 @@ func (v VarType) String() string {
 
 // Translator translates AST nodes into assembly code.
 type Translator struct {
-	asm                []string          // Stores generated .text section assembly lines
-	dataSection        []string          // Stores generated .data section assembly lines
+	asm                []string            // Stores generated .text section assembly lines
+	dataSection        []string            // Stores generated .data section assembly lines
 	symbolTables       []map[string]string // Stack of maps: original name -> mangled name
 	varInfo            map[string]VarType  // Map: mangled name -> type
 	scopeCounter       int
@@ -62,8 +62,8 @@ type Translator struct {
 	currentFuncDef     *ast.FunctionDecl // Keep track of the current function being defined
 	funcSyms           map[string]*ast.FunctionDecl
 	DebugMode          bool
-	needsStringHelpers bool              // Tracks if string concatenation helpers are needed
-	needsStrcmp        bool              // Tracks if strcmp is needed
+	needsStringHelpers bool // Tracks if string concatenation helpers are needed
+	needsStrcmp        bool // Tracks if strcmp is needed
 
 	// Register allocation
 	intRegs   []bool // Availability of general-purpose integer registers (X9-X15)
@@ -406,7 +406,13 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 		epilogueLabel := fmt.Sprintf(".L_anonymous_func_%d_epilogue", t.stringCounter-1)
 		t.addAsm(epilogueLabel + ":") // Match potential anonymous label
 	}
-	t.addAsm("    MOV W0, #0")              // Default return code 0 for other functions
+	// For void functions, ensure a default return value of 0.
+	// Non-void functions must have explicit return statements that set X0.
+	// The epilogue is jumped to from return statements, so we must not overwrite X0 here.
+	functionReturnType := t.typeNodeToVarType(node.ReturnType)
+	if functionReturnType == TypeVoid {
+		t.addAsm("    MOV W0, #0") // Default return code 0 for void functions
+	}
 	t.addAsm("    LDP X29, X30, [SP], #16") // Restore FP, LR from stack, post-increment SP by 16
 	t.addAsm("    RET")
 	t.addAsm("") // Add a blank line for readability after function definition
@@ -495,227 +501,105 @@ func (t *Translator) VisitBlockStmt(node *ast.BlockStmt) interface{} {
 
 func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting AssignStmt")
+		fmt.Printf("Translator.Visiting AssignStmt, Operator: %s\n", node.Operator)
 	}
 
-	// Get the variable name from the left side (LHS)
-	var varName string
-	if ident, ok := node.Left.(*ast.IdentifierExpr); ok {
-		varName = ident.Name
-	} else {
-		// This is a simplification. Real-world scenarios would handle struct fields, array elements, etc.
-		fmt.Fprintf(os.Stderr, "Unsupported L-value in assignment: %T\n", node.Left)
-		return nil
+	// 1. Get the variable name from the left side (LHS)
+	varName, ok := node.Left.(*ast.IdentifierExpr)
+	if !ok {
+		panic(fmt.Sprintf("Unsupported L-value in assignment: %T", node.Left))
 	}
 
-	// We need to know the type of the variable to use the correct store instruction.
-	mangledName, varType, typeExists := t.lookupSymbol(varName)
-	if !typeExists {
-		fmt.Fprintf(os.Stderr, "Assignment to undeclared variable: %s\n", varName)
-		return nil
-	}
-
-	// Handle different assignment operators
-	switch node.Operator {
-	case "=":
-		// Evaluate the right side (RHS) and generate code to store the value.
-		// This is a simplified evaluation that handles literals directly.
-		// A more robust implementation would have expression visitors return results in registers.
-		switch rhs := node.Right.(type) {
-		case *ast.BoolLiteral:
-			if varType != TypeBool {
-				fmt.Fprintf(os.Stderr, "Type mismatch in assignment to %s. Expected Bool.\n", varName)
-				return nil
-			}
-			val := "0"
-			if rhs.Value {
-				val = "1"
-			}
-			t.addAsm("    // --- Start of assignment to %s ---", varName)
-			t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
-			t.addAsm("    MOV W11, #%s", val)        // Load immediate value (0 or 1)
-			t.addAsm("    STRB W11, [X10]")         // Store byte value
-			t.addAsm("    // --- End of assignment to %s ---", varName)
-			t.addAsm("") // Add a blank line for readability after assignment
-
-		case *ast.IntegerLiteral:
-			if varType != TypeInt {
-				fmt.Fprintf(os.Stderr, "Type mismatch in assignment to %s. Expected Int.\n", varName)
-				return nil
-			}
-			t.addAsm("    // --- Start of assignment to %s ---", varName)
-			t.addAsm("    LDR X10, =%s", mangledName)      // Load address of the variable
-			t.addAsm("    MOV W11, #%s", rhs.Value)    // Load immediate integer value
-			t.addAsm("    STR W11, [X10]")                // Store word value
-			t.addAsm("    // --- End of assignment to %s ---", varName)
-			t.addAsm("") // Add a blank line for readability after assignment
-
-		case *ast.IdentifierExpr:
-			rhsVarName := rhs.Name
-			rhsMangledName, rhsVarType, rhsExists := t.lookupSymbol(rhsVarName)
-			if !rhsExists {
-				fmt.Fprintf(os.Stderr, "Assignment from undeclared variable: %s\n", rhsVarName)
-				return nil
-			}
-
-			// Basic type check
-			if varType != rhsVarType {
-				fmt.Fprintf(os.Stderr, "Type mismatch in assignment to %s. Cannot assign value from %s.\n", varName, rhsVarName)
-				return nil
-			}
-
-			t.addAsm("    // --- Start of assignment to %s from %s ---", varName, rhsVarName)
-			switch varType {
-			case TypeInt:
-				t.addAsm("    LDR X9, =%s", rhsMangledName) // Load address of RHS
-				t.addAsm("    LDR W11, [X9]")               // Load value from RHS
-				t.addAsm("    LDR X10, =%s", mangledName)    // Load address of LHS
-				t.addAsm("    STR W11, [X10]")               // Store value to LHS
-			case TypeBool:
-				t.addAsm("    LDR X9, =%s", rhsMangledName) // Load address of RHS
-				t.addAsm("    LDRB W11, [X9]")              // Load byte from RHS
-				t.addAsm("    LDR X10, =%s", mangledName)   // Load address of LHS
-				t.addAsm("    STRB W11, [X10]")             // Store byte to LHS
-			default:
-				fmt.Fprintf(os.Stderr, "Unsupported type for variable-to-variable assignment: %s\n", varType)
-				return nil
-			}
-			t.addAsm("    // --- End of assignment to %s from %s ---", varName, rhsVarName)
-			t.addAsm("")
-
-		// TODO: Add cases for other literal types like FloatLiteral, StringLiteral.
-		// TODO: Add cases for BinaryExpr (assignment from an arithmetic operation).
-
-		default:
-			fmt.Fprintf(os.Stderr, "Unsupported R-value in assignment: %T\n", node.Right)
-			if node.Right != nil {
-				node.Right.Accept(t)
-			}
+	// 2. Handle short variable declaration (:=) vs. simple assignment (=)
+	if node.Operator == ":=" {
+		// --- Short Variable Declaration (:=) ---
+		// Evaluate the RHS to get the value and type
+		initResult := node.Right.Accept(t)
+		res, ok := initResult.(ExpressionResult)
+		if !ok {
+			panic(fmt.Sprintf("Initializer for %s did not return an ExpressionResult", varName.Name))
 		}
-	case "+=":
-		switch varType {
-		case TypeInt:
-			if rhs, ok := node.Right.(*ast.IntegerLiteral); ok {
-				t.addAsm("    // --- Start of compound assignment (+=) to %s ---", varName)
-				t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
-				t.addAsm("    LDR W11, [X10]")           // Load current value of var
-				t.addAsm("    MOV W12, #%s", rhs.Value) // Load immediate integer value from RHS
-				t.addAsm("    ADD W11, W11, W12")        // Perform addition
-				t.addAsm("    STR W11, [X10]")           // Store result back
-				t.addAsm("    // --- End of compound assignment (+=) to %s ---", varName)
-				t.addAsm("")
-			} else {
-				fmt.Fprintf(os.Stderr, "Unsupported R-value in compound assignment for Int: %T\n", node.Right)
-			}
+
+		// Define the new symbol in the symbol table with the inferred type
+		mangledName := t.defineSymbol(varName.Name, res.Type)
+
+		// Add variable to .data section, initializing to zero/null.
+		switch res.Type {
+		case TypeInt, TypeBool:
+			t.addData(fmt.Sprintf("%s: .quad 0", mangledName))
 		case TypeFloat:
-			t.addAsm("    // --- Start of compound assignment (+=) to %s ---", varName)
-			// Create a label for 1.0 in the data section.
-			oneLabel := t.newLabel("float_one")
-			t.addData(fmt.Sprintf("%s: .double 1.0", oneLabel))
-
-			t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
-			t.addAsm("    LDR D8, [X10]")           // Load current value of var into float register D8
-
-			t.addAsm("    LDR X11, =%s", oneLabel)  // Load address of 1.0
-			t.addAsm("    LDR D9, [X11]")           // Load 1.0 into D9
-
-			switch rhs := node.Right.(type) {
-			case *ast.IntegerLiteral:
-				t.addAsm("    MOV W11, #%s", rhs.Value) // Load immediate integer value
-				t.addAsm("    SCVTF D9, W11")           // Convert integer in W11 to float in D9
-				t.addAsm("    FADD D8, D8, D9")         // Perform float addition
-			case *ast.FloatLiteral:
-				floatLabel := t.newLabel("float")
-				t.addData(fmt.Sprintf("%s: .double %s", floatLabel, rhs.Value))
-				t.addAsm("    LDR X11, =%s", floatLabel) // Load address of float literal
-				t.addAsm("    LDR D9, [X11]")            // Load float literal into D9
-				t.addAsm("    FADD D8, D8, D9")          // Perform float addition
-			default:
-				fmt.Fprintf(os.Stderr, "Unsupported R-value in compound assignment for Float: %T\n", node.Right)
-				t.addAsm("    // --- Aborted compound assignment due to unsupported RHS ---")
-				return nil
-			}
-			t.addAsm("    STR D8, [X10]") // Store result back
-			t.addAsm("    // --- End of compound assignment (+=) to %s ---", varName)
-			t.addAsm("")
+			t.addData(fmt.Sprintf("%s: .double 0.0", mangledName))
 		case TypeString:
-			t.needsStringHelpers = true // Ensure string helpers are included
-			// 1. Load the address of the variable that holds the string pointer
-			lhsAddrReg := t.acquireIntRegister()
-			t.addAsm("    LDR X%d, =%s", lhsAddrReg, mangledName)
-
-			// 2. Load the pointer to the string data (the LHS of +=)
-			lhsPtrReg := t.acquireIntRegister()
-			t.addAsm("    LDR X%d, [X%d]", lhsPtrReg, lhsAddrReg)
-
-			// 3. Evaluate the RHS expression
-			rhsResult := node.Right.Accept(t).(ExpressionResult)
-
-			// 4. Concatenate the strings
-			concatResult := t.concatenateStrings(ExpressionResult{Reg: lhsPtrReg, Type: TypeString}, rhsResult)
-
-			// 5. Store the new string's pointer back into the variable
-			t.addAsm("    STR X%d, [X%d]", concatResult.Reg, lhsAddrReg)
-
-			// 6. Release registers
-			t.releaseIntRegister(lhsAddrReg)
-			t.releaseIntRegister(concatResult.Reg) // This is the new string pointer
+			t.addData(fmt.Sprintf("%s: .quad 0", mangledName)) // Store pointer, init to null
 		default:
-			fmt.Fprintf(os.Stderr, "Unsupported type for compound assignment ('%s'): %s\n", node.Operator, varType)
-			return nil
+			panic(fmt.Sprintf("Unsupported type for variable declaration: %s", res.Type))
 		}
-	case "-=":
-		switch varType {
-		case TypeInt:
-			if rhs, ok := node.Right.(*ast.IntegerLiteral); ok {
-				t.addAsm("    // --- Start of compound assignment (-=) to %s ---", varName)
-				t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
-				t.addAsm("    LDR W11, [X10]")           // Load current value of var
-				t.addAsm("    MOV W12, #%s", rhs.Value) // Load immediate integer value from RHS
-				t.addAsm("    SUB W11, W11, W12")        // Perform subtraction
-				t.addAsm("    STR W11, [X10]")           // Store result back
-				t.addAsm("    // --- End of compound assignment (-=) to %s ---", varName)
-				t.addAsm("")
-			} else {
-				fmt.Fprintf(os.Stderr, "Unsupported R-value in compound assignment for Int: %T\n", node.Right)
-			}
+
+		// Store the result from the register into the variable's memory location
+		t.addAsm("    // Storing initializer for new variable %s", varName.Name)
+		t.addAsm("    LDR X9, =%s", mangledName) // Load address of variable into X9
+
+		switch res.Type {
+		case TypeInt, TypeBool:
+			t.addAsm("    STR W%d, [X9]", res.Reg) // Store from W-register
+			t.releaseIntRegister(res.Reg)
 		case TypeFloat:
-			t.addAsm("    // --- Start of compound assignment (-=) to %s ---", varName)
-			// Create a label for 1.0 in the data section.
-			oneLabel := t.newLabel("float_one")
-			t.addData(fmt.Sprintf("%s: .double 1.0", oneLabel))
-
-			t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
-			t.addAsm("    LDR D8, [X10]")           // Load current value of var into float register D8
-
-			t.addAsm("    LDR X11, =%s", oneLabel)  // Load address of 1.0
-			t.addAsm("    LDR D9, [X11]")           // Load 1.0 into D9
-
-			switch rhs := node.Right.(type) {
-			case *ast.IntegerLiteral:
-				t.addAsm("    MOV W11, #%s", rhs.Value) // Load immediate integer value
-				t.addAsm("    SCVTF D9, W11")           // Convert integer in W11 to float in D9
-				t.addAsm("    FSUB D8, D8, D9")         // Perform float subtraction
-			case *ast.FloatLiteral:
-				floatLabel := t.newLabel("float")
-				t.addData(fmt.Sprintf("%s: .double %s", floatLabel, rhs.Value))
-				t.addAsm("    LDR X11, =%s", floatLabel) // Load address of float literal
-				t.addAsm("    LDR D9, [X11]")            // Load float literal into D9
-				t.addAsm("    FSUB D8, D8, D9")          // Perform float subtraction
-			default:
-				fmt.Fprintf(os.Stderr, "Unsupported R-value in compound assignment for Float: %T\n", node.Right)
-				t.addAsm("    // --- Aborted compound assignment due to unsupported RHS ---")
-				return nil
-			}
-			t.addAsm("    STR D8, [X10]") // Store result back
-			t.addAsm("    // --- End of compound assignment (-=) to %s ---", varName)
-			t.addAsm("")
-		default:
-			fmt.Fprintf(os.Stderr, "Unsupported type for compound assignment (-=): %s\n", varType)
-			return nil
+			t.addAsm("    STR D%d, [X9]", res.Reg) // Store from D-register
+			t.releaseFloatRegister(res.Reg)
+		case TypeString:
+			t.addAsm("    STR X%d, [X9]", res.Reg) // Store from X-register (pointer)
+			t.releaseIntRegister(res.Reg)
 		}
-	default:
-		fmt.Fprintf(os.Stderr, "Unsupported assignment operator: %s\n", node.Operator)
+
+	} else if node.Operator == "=" {
+		// --- Simple Assignment (=) ---
+		// Lookup the existing variable
+		mangledName, varType, exists := t.lookupSymbol(varName.Name)
+		if !exists {
+			panic(fmt.Sprintf("Assignment to undeclared variable: %s", varName.Name))
+		}
+
+		// Evaluate the RHS
+		rightResult := node.Right.Accept(t)
+		res, ok := rightResult.(ExpressionResult)
+		if !ok {
+			panic(fmt.Sprintf("RHS of assignment for %s did not return an ExpressionResult", varName.Name))
+		}
+
+		// Basic type check
+		if varType != res.Type {
+			// Allow int to float promotion
+			if !(varType == TypeFloat && res.Type == TypeInt) {
+				panic(fmt.Sprintf("Type mismatch in assignment to %s. Expected %s, got %s", varName.Name, varType, res.Type))
+			}
+		}
+
+		t.addAsm("    // Storing value for assignment to %s", varName.Name)
+		t.addAsm("    LDR X9, =%s", mangledName) // Load address of variable into X9
+
+		// Handle type promotion if necessary (int to float)
+		if varType == TypeFloat && res.Type == TypeInt {
+			t.addAsm("    // Promoting RHS from INT to FLOAT for assignment")
+			promotedFloatReg := t.acquireFloatRegister()
+			t.addAsm("    SCVTF D%d, W%d", promotedFloatReg, res.Reg)
+			t.releaseIntRegister(res.Reg)
+			res = ExpressionResult{Reg: promotedFloatReg, Type: TypeFloat}
+		}
+
+		switch res.Type {
+		case TypeInt, TypeBool:
+			t.addAsm("    STR W%d, [X9]", res.Reg)
+			t.releaseIntRegister(res.Reg)
+		case TypeFloat:
+			t.addAsm("    STR D%d, [X9]", res.Reg)
+			t.releaseFloatRegister(res.Reg)
+		case TypeString:
+			t.addAsm("    STR X%d, [X9]", res.Reg)
+			t.releaseIntRegister(res.Reg)
+		}
+	} else {
+		// TODO: Handle compound assignments like +=, -=, etc.
+		panic(fmt.Sprintf("Unsupported assignment operator: %s", node.Operator))
 	}
 
 	return nil
@@ -782,7 +666,7 @@ func (t *Translator) VisitIncDecStmt(node *ast.IncDecStmt) interface{} {
 	case TypeInt:
 		t.addAsm("    // --- Start of integer inc/dec on %s ---", varName)
 		t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
-		t.addAsm("    LDR W11, [X10]")           // Load current value of var
+		t.addAsm("    LDR W11, [X10]")            // Load current value of var
 
 		switch node.Operator {
 		case "++":
@@ -801,10 +685,10 @@ func (t *Translator) VisitIncDecStmt(node *ast.IncDecStmt) interface{} {
 		t.addData(fmt.Sprintf("%s: .double 1.0", oneLabel))
 
 		t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
-		t.addAsm("    LDR D8, [X10]")           // Load current value of var into float register D8
+		t.addAsm("    LDR D8, [X10]")             // Load current value of var into float register D8
 
-		t.addAsm("    LDR X11, =%s", oneLabel)  // Load address of 1.0
-		t.addAsm("    LDR D9, [X11]")           // Load 1.0 into D9
+		t.addAsm("    LDR X11, =%s", oneLabel) // Load address of 1.0
+		t.addAsm("    LDR D9, [X11]")          // Load 1.0 into D9
 
 		switch node.Operator {
 		case "++":
@@ -824,17 +708,54 @@ func (t *Translator) VisitIncDecStmt(node *ast.IncDecStmt) interface{} {
 	return nil
 }
 
-
 func (t *Translator) VisitIfStmt(node *ast.IfStmt) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting IfStmt")
 	}
-	// TODO: Implement IfStmt translation (e.g., conditional jumps, labels)
-	node.Condition.Accept(t)
+
+	elseLabel := t.newLabel(".Lelse")
+	endLabel := t.newLabel(".Lendif")
+
+	// 1. Evaluate the condition
+	conditionResult, ok := node.Condition.Accept(t).(ExpressionResult)
+	if !ok {
+		// This might happen if the condition is a function call that doesn't return a value
+		// or another expression type we haven't handled to return an ExpressionResult.
+		// For now, we'll panic. A more robust compiler would have better error handling.
+		panic("Condition in if statement did not return a valid ExpressionResult.")
+	}
+
+	// 2. Compare the result of the condition and branch if false
+	// The result of a boolean expression should be in a register (0 for false, 1 for true).
+	t.addAsm("    // If statement condition check")
+	t.addAsm("    CMP W%d, #0", conditionResult.Reg) // Compare the result with 0
+	t.releaseIntRegister(conditionResult.Reg)      // Free up the register
+
+	if node.Alternative != nil {
+		t.addAsm("    B.EQ %s", elseLabel) // If condition is false (result == 0), jump to the 'else' part
+	} else {
+		t.addAsm("    B.EQ %s", endLabel) // If condition is false and no 'else', jump to the end
+	}
+
+	// 3. Translate the 'then' block (Consequence)
+	t.addAsm("    // 'Then' block")
 	node.Consequence.Accept(t)
-	if node.Alternative != nil { // This handles both "else if" (if Alternative is IfStmt) and "else" (if Alternative is BlockStmt)
+
+	// 4. If there's an 'else' block, add an unconditional jump to the end to skip it
+	if node.Alternative != nil {
+		t.addAsm("    B %s", endLabel)
+	}
+
+	// 5. Emit the 'else' label and translate the 'else' block (Alternative)
+	if node.Alternative != nil {
+		t.addAsm("%s:", elseLabel)
+		t.addAsm("    // 'Else' block")
 		node.Alternative.Accept(t)
 	}
+
+	// 6. Emit the 'end' label
+	t.addAsm("%s:", endLabel)
+
 	return nil
 }
 
@@ -1053,8 +974,8 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 			// a % n = a - (a/n) * n
 			divResultReg := t.acquireIntRegister()
 			t.addAsm("    SDIV X%d, X%d, X%d", divResultReg, leftResult.Reg, rightResult.Reg) // divResultReg = a / n
-			t.addAsm("    MUL X%d, X%d, X%d", divResultReg, divResultReg, rightResult.Reg)   // divResultReg = (a / n) * n
-			t.addAsm("    SUB X%d, X%d, X%d", resultReg, leftResult.Reg, divResultReg)      // resultReg = a - divResultReg
+			t.addAsm("    MUL X%d, X%d, X%d", divResultReg, divResultReg, rightResult.Reg)    // divResultReg = (a / n) * n
+			t.addAsm("    SUB X%d, X%d, X%d", resultReg, leftResult.Reg, divResultReg)        // resultReg = a - divResultReg
 			t.releaseIntRegister(divResultReg)
 		case "==", "!=", ">", "<", ">=", "<=":
 			t.addAsm("    CMP X%d, X%d", leftResult.Reg, rightResult.Reg)
@@ -1086,7 +1007,12 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 			// Default to releasing an integer register for Int, Bool, etc.
 			t.releaseIntRegister(rightResult.Reg)
 		}
-		return ExpressionResult{Reg: resultReg, Type: TypeInt}
+		// For arithmetic operators, the type is Int. For relational, it's Bool.
+		resultType := TypeInt
+		if isRelationalOp(node.Operator) {
+			resultType = TypeBool
+		}
+		return ExpressionResult{Reg: resultReg, Type: resultType}
 	case TypeBool:
 		resultReg := leftResult.Reg
 		switch node.Operator {
@@ -1315,8 +1241,6 @@ func (t *Translator) VisitTypeConversionExpr(node *ast.TypeConversionExpr) inter
 	// TODO: Implement TypeConversionExpr translation
 	return nil
 }
-
-
 
 func (t *Translator) VisitCompositeLiteralExpr(node *ast.CompositeLiteralExpr) interface{} {
 	if t.DebugMode {

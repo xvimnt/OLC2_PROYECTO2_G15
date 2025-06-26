@@ -31,30 +31,47 @@ get_grade:
     CMP X11, X9
     CSET X11, GT
     ORR W10, W10, W11
+    // If statement condition check
+    CMP W10, #0
+    B.EQ .Lendif2
+    // 'Then' block
     LDR X9, =str0
     MOV X0, X9
     B .Lget_grade_epilogue
+.Lendif2:
     LDR X9, =score_1
-    LDRSW X11, [X9]
+    LDRSW X10, [X9]
     MOV X9, #90
-    CMP X11, X9
-    CSET X11, GE
+    CMP X10, X9
+    CSET X10, GE
+    // If statement condition check
+    CMP W10, #0
+    B.EQ .Lelse3
+    // 'Then' block
     LDR X9, =str1
     MOV X0, X9
     B .Lget_grade_epilogue
+    B .Lendif4
+.Lelse3:
+    // 'Else' block
     LDR X9, =score_1
-    LDRSW X12, [X9]
+    LDRSW X10, [X9]
     MOV X9, #80
-    CMP X12, X9
-    CSET X12, GE
+    CMP X10, X9
+    CSET X10, GE
+    // If statement condition check
+    CMP W10, #0
+    B.EQ .Lendif6
+    // 'Then' block
     LDR X9, =str2
     MOV X0, X9
     B .Lget_grade_epilogue
+.Lendif6:
+.Lendif4:
     LDR X9, =str3
     MOV X0, X9
     B .Lget_grade_epilogue
 .Lget_grade_epilogue:
-    MOV W0, #0
     LDP X29, X30, [SP], #16
     RET
 

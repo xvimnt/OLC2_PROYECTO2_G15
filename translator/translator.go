@@ -3,6 +3,7 @@ package translator
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/xvimnt/OLC2_PROYECTO2_G15/ast"
@@ -603,9 +604,78 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 			t.addAsm("    STR X%d, [X9]", res.Reg)
 			t.releaseIntRegister(res.Reg)
 		}
-	} else {
-		// TODO: Handle compound assignments like +=, -=, etc.
-		panic(fmt.Sprintf("Unsupported assignment operator: %s", node.Operator))
+	} else { // Compound assignment operators
+		// 1. Get the variable name from the left side (LHS)
+		varName, ok := node.Left.(*ast.IdentifierExpr)
+		if !ok {
+			panic(fmt.Sprintf("Unsupported L-value in assignment: %T", node.Left))
+		}
+
+		// 2. Lookup the existing variable
+		mangledName, varType, exists := t.lookupSymbol(varName.Name)
+		if !exists {
+			panic(fmt.Sprintf("Assignment to undeclared variable: %s", varName.Name))
+		}
+
+		// 3. Evaluate the RHS
+		rightResult := node.Right.Accept(t).(ExpressionResult)
+
+		// 4. Acquire a register to hold the address of the variable.
+		addrReg := t.acquireIntRegister()
+		t.addAsm("    // --- Start Compound Assignment: %s ---", node.Operator)
+		t.addAsm("    LDR X%d, =%s", addrReg, mangledName)
+
+		if varType == TypeFloat {
+			// 4a. Load the current value of the float variable
+			currentValReg := t.acquireFloatRegister()
+			t.addAsm("    LDR D%d, [X%d]", currentValReg, addrReg)
+
+			// 5a. Perform the float operation
+			switch node.Operator {
+			case "+=":
+				if rightResult.Type == TypeFloat {
+					t.addAsm("    FADD D%d, D%d, D%d", currentValReg, currentValReg, rightResult.Reg)
+				} else {
+					panic(fmt.Sprintf("Type mismatch for '+=' operator: %s and %s", varType, rightResult.Type))
+				}
+			default:
+				panic(fmt.Sprintf("Unsupported compound assignment operator for floats: %s", node.Operator))
+			}
+
+			// 6a. Store the new float value back
+			t.addAsm("    STR D%d, [X%d]", currentValReg, addrReg)
+
+			// 7a. Release float registers
+			t.releaseFloatRegister(currentValReg)
+			t.releaseFloatRegister(rightResult.Reg)
+		} else { // Integer operation
+			// 4b. Load the current value of the integer variable
+			currentValReg := t.acquireIntRegister()
+			t.addAsm("    LDRSW X%d, [X%d]", currentValReg, addrReg)
+
+			// 5b. Perform the integer operation
+			switch node.Operator {
+			case "+=":
+				if rightResult.Type == TypeInt {
+					t.addAsm("    ADD X%d, X%d, X%d", currentValReg, currentValReg, rightResult.Reg)
+				} else {
+					panic(fmt.Sprintf("Type mismatch for '+=' operator: %s and %s", varType, rightResult.Type))
+				}
+			default:
+				panic(fmt.Sprintf("Unsupported compound assignment operator for ints: %s", node.Operator))
+			}
+
+			// 6b. Store the new integer value back
+			t.addAsm("    STR W%d, [X%d]", currentValReg, addrReg)
+
+			// 7b. Release integer registers
+			t.releaseIntRegister(currentValReg)
+			t.releaseIntRegister(rightResult.Reg)
+		}
+
+		// Release the address register
+		t.releaseIntRegister(addrReg)
+		t.addAsm("    // --- End Compound Assignment ---")
 	}
 
 	return nil
@@ -1597,6 +1667,9 @@ func (t *Translator) handlePrintln(args []ast.Expression) interface{} {
 	var formatString strings.Builder
 	var evaluatedArgs []ExpressionResult
 
+	// Regex to find interpolated variables like $var
+	re := regexp.MustCompile(`\$([a-zA-Z_][a-zA-Z0-9_]*)`)
+
 	// 1. Evaluate all expressions first and build the format string.
 	for i, arg := range args {
 		if i > 0 {
@@ -1604,24 +1677,80 @@ func (t *Translator) handlePrintln(args []ast.Expression) interface{} {
 		}
 
 		if strLit, ok := arg.(*ast.StringLiteral); ok {
-			sanitizedStr := strings.ReplaceAll(strings.Trim(strLit.Value, "\""), "%", "%%")
-			formatString.WriteString(sanitizedStr)
+			content := strings.Trim(strLit.Value, "\"")
+			// Escape '%' characters in the literal parts of the string to prevent printf errors
+			content = strings.ReplaceAll(content, "%", "%%")
+
+			matches := re.FindAllStringSubmatchIndex(content, -1)
+			lastIndex := 0
+
+			for _, match := range matches {
+				// Add the literal part before the variable
+				formatString.WriteString(content[lastIndex:match[0]])
+
+				// Get variable name
+				varName := content[match[2]:match[3]]
+
+				// Look up symbol
+				mangledName, varType, exists := t.lookupSymbol(varName)
+				if !exists {
+					panic(fmt.Sprintf("Undefined variable in string interpolation: %s", varName))
+				}
+
+				// Load the variable's value
+				var result ExpressionResult
+				addrReg := t.acquireIntRegister()
+				t.addAsm("    LDR X%d, =%s", addrReg, mangledName)
+
+				switch varType {
+				case TypeInt:
+					reg := t.acquireIntRegister()
+					t.addAsm("    LDRSW X%d, [X%d]", reg, addrReg)
+					result = ExpressionResult{Reg: reg, Type: TypeInt}
+					formatString.WriteString("%d")
+				case TypeFloat:
+					reg := t.acquireFloatRegister()
+					t.addAsm("    LDR D%d, [X%d]", reg, addrReg)
+					result = ExpressionResult{Reg: reg, Type: TypeFloat}
+					formatString.WriteString("%f")
+				case TypeString:
+					reg := t.acquireIntRegister()
+					t.addAsm("    LDR X%d, [X%d]", reg, addrReg)
+					result = ExpressionResult{Reg: reg, Type: TypeString}
+					formatString.WriteString("%s")
+				case TypeBool:
+					reg := t.acquireIntRegister()
+					t.addAsm("    LDRB W%d, [X%d]", reg, addrReg) // Load byte for bool
+					result = ExpressionResult{Reg: reg, Type: TypeBool}
+					formatString.WriteString("%s") // Will be handled later by the bool-to-string logic
+				default:
+					t.releaseIntRegister(addrReg) // Release before panic
+					panic(fmt.Sprintf("Unsupported type for interpolation: %s", varType))
+				}
+				t.releaseIntRegister(addrReg)
+				evaluatedArgs = append(evaluatedArgs, result)
+
+				lastIndex = match[1]
+			}
+			// Add the rest of the string after the last variable
+			formatString.WriteString(content[lastIndex:])
 		} else {
+			// This is the old logic for non-string-literal arguments
 			result := arg.Accept(t).(ExpressionResult)
 			evaluatedArgs = append(evaluatedArgs, result)
 
-			switch result.Type {
-			case TypeInt:
-				formatString.WriteString("%d")
-			case TypeBool:
-				formatString.WriteString("%s") // Booleans will be printed as "true" or "false"
-			case TypeFloat:
-				formatString.WriteString("%f")
-			case TypeString:
-				formatString.WriteString("%s")
-			default:
-				panic(fmt.Sprintf("Unsupported type for println: %s", result.Type))
-			}
+				switch result.Type {
+				case TypeInt:
+					formatString.WriteString("%d")
+				case TypeBool:
+					formatString.WriteString("%s")
+				case TypeFloat:
+					formatString.WriteString("%f")
+				case TypeString:
+					formatString.WriteString("%s")
+				default:
+					panic(fmt.Sprintf("Unsupported type for println: %s", result.Type))
+				}
 		}
 	}
 	formatString.WriteString("\n")

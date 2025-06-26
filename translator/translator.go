@@ -667,6 +667,34 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 				} else {
 					panic(fmt.Sprintf("Type mismatch for '+=' operator: %s and %s", varType, rightResult.Type))
 				}
+			case "-=":
+				if rightResult.Type == TypeInt {
+					t.addAsm("    SUB X%d, X%d, X%d", currentValReg, currentValReg, rightResult.Reg)
+				} else {
+					panic(fmt.Sprintf("Type mismatch for '-=' operator: %s and %s", varType, rightResult.Type))
+				}
+			case "*=":
+				if rightResult.Type == TypeInt {
+					t.addAsm("    MUL X%d, X%d, X%d", currentValReg, currentValReg, rightResult.Reg)
+				} else {
+					panic(fmt.Sprintf("Type mismatch for '*=' operator: %s and %s", varType, rightResult.Type))
+				}
+			case "/=":
+				if rightResult.Type == TypeInt {
+					t.addAsm("    SDIV X%d, X%d, X%d", currentValReg, currentValReg, rightResult.Reg)
+				} else {
+					panic(fmt.Sprintf("Type mismatch for '/=' operator: %s and %s", varType, rightResult.Type))
+				}
+			case "%=":
+				if rightResult.Type == TypeInt {
+					// result = a - (a / b) * b
+					quotientReg := t.acquireIntRegister()
+					t.addAsm("    SDIV X%d, X%d, X%d", quotientReg, currentValReg, rightResult.Reg)
+					t.addAsm("    MSUB X%d, X%d, X%d, X%d", currentValReg, quotientReg, rightResult.Reg, currentValReg)
+					t.releaseIntRegister(quotientReg)
+				} else {
+					panic(fmt.Sprintf("Type mismatch for '%%=' operator: %s and %s", varType, rightResult.Type))
+				}
 			default:
 				panic(fmt.Sprintf("Unsupported compound assignment operator for ints: %s", node.Operator))
 			}

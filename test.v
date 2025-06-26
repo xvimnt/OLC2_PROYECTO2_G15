@@ -1,75 +1,89 @@
+fn saludar() {
+	println("¡Hola, mundo!")
+}
+
+fn obtener_numero() int {
+	return 42
+}
+
+fn sumar(a int, b int) int {
+	return a + b
+}
+
+fn saludar_persona(nombre string) {
+	println("¡Hola, $nombre!")
+}
+
+fn atoi(s string) int {
+	// Simulación
+	return 123
+}
+
+fn parse_float(s string) f64 {
+	if s == "123.45" {
+		return 123.45
+	}
+	if s == "123" {
+		return 123.0
+	}
+	return 0.0
+}
+
 fn main() {
 	mut puntos = 0
-	println("=== Prueba Básica Simplificada ===")
+	println("=== Prueba de funciones simplificada ===")
 
-	// 1. Declaración de variables
-	mut entero = 42
-	mut decimal = 3.14
-	mut texto = "Hola, mundo!"
-	mut booleano = true
-
-	if entero == 42 {
-		println("OK entero")
-		puntos += 1
+	// 1. Funciones sin parámetros
+	mut puntos_simples = 0
+	saludar()
+	numero := obtener_numero()
+	println("Número obtenido:", numero)
+	if numero == 42 {
+		println("OK obtener_numero")
+		puntos_simples += 1
 	}
 
-	if decimal > 3.0 {
-		println("OK decimal")
-		puntos += 1
-	}
-
-	if texto == "Hola, mundo!" {
-		println("OK texto")
-		puntos += 1
-	}
-
-	if booleano {
-		println("OK booleano")
-		puntos += 1
-	}
-
-	// 2. Asignación
-	entero = 99
-	if entero == 99 {
-		println("OK asignación entero")
-		puntos += 1
-	}
-
-	// 3. Aritmética
-	mut suma = 10 + 5
-	if suma == 15 {
+	// 2. Funciones con parámetros
+	mut puntos_param = 0
+	saludar_persona("Juan")
+	resultado := sumar(10, 20)
+	println("Resultado de suma:", resultado)
+	if resultado == 30 {
 		println("OK suma")
-		puntos += 1
+		puntos_param += 1
 	}
 
-	mut resta = 10 - 5
-	if resta == 5 {
-		println("OK resta")
-		puntos += 1
+	// 3. Simulación de Atoi
+	mut puntos_atoi = 0
+	val := atoi("123")
+	println('"123" convertido a int:', val)
+	if val == 123 {
+		println("OK atoi")
+		puntos_atoi += 1
 	}
 
-	// 4. Relacional
-	if 10 == 10 {
-		println("OK igualdad")
-		puntos += 1
+	// 4. Simulación de ParseFloat
+	mut puntos_parse = 0
+	val1 := parse_float("123.45")
+	val2 := parse_float("123")
+	println("parse_float('123.45') =", val1)
+	println("parse_float('123') =", val2)
+	if val1 == 123.45 {
+		puntos_parse += 1
+		println("OK parse_float 123.45")
+	}
+	if val2 == 123.0 {
+		puntos_parse += 1
+		println("OK parse_float 123")
 	}
 
-	// 5. Lógica
-	if true && true {
-		println("OK lógica AND")
-		puntos += 1
-	}
+	// Total
+	puntos = puntos_simples + puntos_param + puntos_atoi + puntos_parse
 
-	if !(false || false) {
-		println("OK lógica OR negada")
-		puntos += 1
-	}
-
-	// 6. Print básicos
-	println(42)
-	println("Texto de prueba")
-	println(true)
-
-	// Resultado final
-	println("Puntos obtenidos: $puntos / 10")
+	println("\n=== Resultados Simplificados ===")
+	println("Funciones sin parámetros:", puntos_simples)
+	println("Funciones con parámetros:", puntos_param)
+	println("Atoi:", puntos_atoi)
+	println("ParseFloat:", puntos_parse)
+	println("TOTAL:", puntos)
 }

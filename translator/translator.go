@@ -1664,6 +1664,21 @@ func (t *Translator) typeNodeToVarType(typeNode ast.TypeNode) VarType {
 			panic(fmt.Sprintf("Unsupported primitive type kind: %v", n.Kind))
 		}
 	// TODO: Add cases for other types like Array, Struct, etc. as they are implemented.
+	case *ast.TypeName:
+		switch n.Name {
+		case "int":
+			return TypeInt
+		case "f64":
+			return TypeFloat
+		case "string":
+			return TypeString
+		case "bool":
+			return TypeBool
+		case "void":
+			return TypeVoid
+		default:
+			panic(fmt.Sprintf("Unsupported type name: %s", n.Name))
+		}
 	default:
 		panic(fmt.Sprintf("Unsupported type node: %T", n))
 	}

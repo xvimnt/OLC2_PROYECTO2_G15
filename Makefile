@@ -39,7 +39,7 @@ build-arm:
 # Run the ARM executable using QEMU
 run-arm:
 	@echo "Running ARM executable with QEMU..."
-	wsl /usr/bin/qemu-aarch64-static "/mnt/c/Users/matri/OneDrive/Documents/USAC/OLC2_PROYECTO2_G15/output.exe"
+	@powershell -Command "$$wsl_path = ((Get-Location).Path.Replace('C:\', '/mnt/c/').Replace('\', '/') + '/$(ARM_OUTPUT)'); wsl /usr/bin/qemu-aarch64-static $$wsl_path > wsl_output.txt 2>&1; Write-Host '--- QEMU Output ---'; type wsl_output.txt; Write-Host '--- End QEMU Output ---'; del wsl_output.txt"
 
 # Run the full build, translate, build-arm, and run-arm flow for test.v
 test-v-flow:

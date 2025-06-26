@@ -897,9 +897,86 @@ func isRelationalOp(op string) bool {
 	}
 }
 
+// handleShortCircuit handles logical AND (&&) and OR (||) with short-circuiting.
+func (t *Translator) handleShortCircuit(node *ast.BinaryExpr) interface{} {
+	resultReg := t.acquireIntRegister()
+	endLabel := t.newLabel(".L_logic_end")
+
+	if node.Operator == "&&" {
+		falseLabel := t.newLabel(".L_logic_false")
+
+		// Evaluate left side
+		leftResult, ok := node.Left.Accept(t).(ExpressionResult)
+		if !ok || leftResult.Type != TypeBool {
+			panic("Left side of && must be a boolean expression")
+		}
+
+		// If left is false (0), jump to set result to 0 and finish
+		t.addAsm("    // Short-circuit AND: check left operand")
+		t.addAsm("    CMP W%d, #0", leftResult.Reg)
+		t.releaseIntRegister(leftResult.Reg)
+		t.addAsm("    B.EQ %s", falseLabel)
+
+		// Left was true, so evaluate right side
+		rightResult, ok := node.Right.Accept(t).(ExpressionResult)
+		if !ok || rightResult.Type != TypeBool {
+			panic("Right side of && must be a boolean expression")
+		}
+
+		// The result of the expression is the result of the right side
+		t.addAsm("    // Left was true, result is right operand")
+		t.addAsm("    MOV W%d, W%d", resultReg, rightResult.Reg)
+		t.releaseIntRegister(rightResult.Reg)
+		t.addAsm("    B %s", endLabel)
+
+		// False label: set result to 0
+		t.addAsm("%s:", falseLabel)
+		t.addAsm("    MOV W%d, #0", resultReg)
+
+	} else { // "||"
+		trueLabel := t.newLabel(".L_logic_true")
+
+		// Evaluate left side
+		leftResult, ok := node.Left.Accept(t).(ExpressionResult)
+		if !ok || leftResult.Type != TypeBool {
+			panic("Left side of || must be a boolean expression")
+		}
+
+		// If left is true (not 0), jump to set result to 1 and finish
+		t.addAsm("    // Short-circuit OR: check left operand")
+		t.addAsm("    CMP W%d, #0", leftResult.Reg)
+		t.releaseIntRegister(leftResult.Reg)
+		t.addAsm("    B.NE %s", trueLabel)
+
+		// Left was false, so evaluate right side
+		rightResult, ok := node.Right.Accept(t).(ExpressionResult)
+		if !ok || rightResult.Type != TypeBool {
+			panic("Right side of || must be a boolean expression")
+		}
+
+		// The result of the expression is the result of the right side
+		t.addAsm("    // Left was false, result is right operand")
+		t.addAsm("    MOV W%d, W%d", resultReg, rightResult.Reg)
+		t.releaseIntRegister(rightResult.Reg)
+		t.addAsm("    B %s", endLabel)
+
+		// True label: set result to 1
+		t.addAsm("%s:", trueLabel)
+		t.addAsm("    MOV W%d, #1", resultReg)
+	}
+
+	t.addAsm("%s:", endLabel)
+	return ExpressionResult{Reg: resultReg, Type: TypeBool}
+}
+
 func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 	if t.DebugMode {
 		fmt.Printf("Translator.Visiting BinaryExpr: %s\n", node.Operator)
+	}
+
+	// Handle short-circuiting for logical operators
+	if node.Operator == "&&" || node.Operator == "||" {
+		return t.handleShortCircuit(node)
 	}
 
 	leftResult := node.Left.Accept(t).(ExpressionResult)
@@ -929,7 +1006,7 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 				cond = "NE" // Set if not equal
 			}
 			// Set result register to 1 if condition is met, 0 otherwise.
-			t.addAsm("    CSET X%d, %s", resultReg, cond)
+			t.addAsm("    CSET W%d, %s", resultReg, cond)
 
 			t.releaseIntRegister(leftResult.Reg)
 			t.releaseIntRegister(rightResult.Reg)
@@ -945,13 +1022,13 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 		if leftResult.Type == TypeInt && rightResult.Type == TypeFloat {
 			t.addAsm("    // Promoting left operand from INT to FLOAT")
 			promotedFloatReg := t.acquireFloatRegister()
-			t.addAsm("    SCVTF D%d, X%d", promotedFloatReg, leftResult.Reg)
+			t.addAsm("    SCVTF D%d, W%d", promotedFloatReg, leftResult.Reg)
 			t.releaseIntRegister(leftResult.Reg)
 			leftResult = ExpressionResult{Reg: promotedFloatReg, Type: TypeFloat}
 		} else if leftResult.Type == TypeFloat && rightResult.Type == TypeInt {
 			t.addAsm("    // Promoting right operand from INT to FLOAT")
 			promotedFloatReg := t.acquireFloatRegister()
-			t.addAsm("    SCVTF D%d, X%d", promotedFloatReg, rightResult.Reg)
+			t.addAsm("    SCVTF D%d, W%d", promotedFloatReg, rightResult.Reg)
 			t.releaseIntRegister(rightResult.Reg)
 			rightResult = ExpressionResult{Reg: promotedFloatReg, Type: TypeFloat}
 		} else {
@@ -980,7 +1057,7 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 			t.addAsm("    SUB X%d, X%d, X%d", resultReg, leftResult.Reg, divResultReg)        // resultReg = a - divResultReg
 			t.releaseIntRegister(divResultReg)
 		case "==", "!=", ">", "<", ">=", "<=":
-			t.addAsm("    CMP X%d, X%d", leftResult.Reg, rightResult.Reg)
+			t.addAsm("    CMP W%d, W%d", leftResult.Reg, rightResult.Reg)
 			cond := ""
 			switch node.Operator {
 			case "==":
@@ -996,7 +1073,7 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 			case "<=":
 				cond = "LE"
 			}
-			t.addAsm("    CSET X%d, %s", resultReg, cond)
+			t.addAsm("    CSET W%d, %s", resultReg, cond)
 			t.releaseIntRegister(rightResult.Reg)
 			return ExpressionResult{Reg: resultReg, Type: TypeBool}
 		default:
@@ -1018,14 +1095,6 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 	case TypeBool:
 		resultReg := leftResult.Reg
 		switch node.Operator {
-		case "&&":
-			t.addAsm("    AND W%d, W%d, W%d", resultReg, leftResult.Reg, rightResult.Reg)
-			t.releaseIntRegister(rightResult.Reg)
-			return ExpressionResult{Reg: resultReg, Type: TypeBool}
-		case "||":
-			t.addAsm("    ORR W%d, W%d, W%d", resultReg, leftResult.Reg, rightResult.Reg)
-			t.releaseIntRegister(rightResult.Reg)
-			return ExpressionResult{Reg: resultReg, Type: TypeBool}
 		case "==", "!=":
 			t.addAsm("    CMP W%d, W%d", leftResult.Reg, rightResult.Reg)
 			cond := ""
@@ -1038,7 +1107,7 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 			t.releaseIntRegister(rightResult.Reg)
 			return ExpressionResult{Reg: resultReg, Type: TypeBool}
 		default:
-			panic(fmt.Sprintf("Unsupported boolean operator: %s", node.Operator))
+			panic(fmt.Sprintf("Unsupported boolean operator: %s. (&& and || are short-circuited)", node.Operator))
 		}
 	case TypeFloat:
 		reg := leftResult.Reg
@@ -1080,7 +1149,7 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 			case "<=":
 				cond = "LE"
 			}
-			t.addAsm("    CSET X%d, %s", resultReg, cond)
+			t.addAsm("    CSET W%d, %s", resultReg, cond)
 			t.releaseFloatRegister(leftResult.Reg)
 			t.releaseFloatRegister(rightResult.Reg)
 			return ExpressionResult{Reg: resultReg, Type: TypeBool}

@@ -1,8 +1,10 @@
 fn main() {
-    mut temperature int = 25
-    if temperature > 30 {
-        println("It's hot.")
-    } else {
-        println("It's not hot.") // Expected
+    mut logged_in bool = true
+    mut user_role string = "admin"
+    if logged_in && (user_role == "admin" || user_role == "moderator") {
+        println("Access level: Privileged") // Expected
+        if user_role == "admin" {
+            println("Admin panel access granted.") // Expected
+        }
     }
 } 

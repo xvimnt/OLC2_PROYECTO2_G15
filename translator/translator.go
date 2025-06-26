@@ -60,6 +60,7 @@ type Translator struct {
 	trueStrLabel       string            // Label for the "true" string literal
 	falseStrLabel      string            // Label for the "false" string literal
 	currentFuncDef     *ast.FunctionDecl // Keep track of the current function being defined
+	funcSyms           map[string]*ast.FunctionDecl
 	DebugMode          bool
 	needsStringHelpers bool              // Tracks if string concatenation helpers are needed
 	needsStrcmp        bool              // Tracks if strcmp is needed
@@ -94,6 +95,7 @@ func NewTranslator(debugMode bool) *Translator {
 		trueStrLabel:       "",
 		falseStrLabel:      "",
 		currentFuncDef:     nil,
+		funcSyms:           make(map[string]*ast.FunctionDecl),
 		DebugMode:          debugMode,
 		needsStrcmp:        false,
 		intRegs:            make([]bool, numIntRegs),
@@ -263,11 +265,31 @@ func (t *Translator) VisitProgram(node *ast.Program) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting Program")
 	}
-	// Global directives and .data section will be prepended by GetAssembly().
-	// Here, we just process declarations.
+
+	// First pass: Register all function declarations.
+	// This allows forward references to functions.
+	if t.DebugMode {
+		fmt.Println("Translator: First pass - registering functions.")
+	}
+	for _, decl := range node.Declarations {
+		if fnDecl, ok := decl.(*ast.FunctionDecl); ok {
+			if fnDecl.Name != nil {
+				if t.DebugMode {
+					fmt.Printf("  - Registering function: %s\n", fnDecl.Name.Name)
+				}
+				t.funcSyms[fnDecl.Name.Name] = fnDecl
+			}
+		}
+	}
+
+	// Second pass: Translate all declarations.
+	if t.DebugMode {
+		fmt.Println("Translator: Second pass - translating declarations.")
+	}
 	for _, decl := range node.Declarations {
 		decl.Accept(t)
 	}
+
 	return nil
 }
 
@@ -318,7 +340,52 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 
 	t.enterScope() // Scope for parameters and locals
 
-	// TODO: Process parameters and add them to the symbol table
+	// Process parameters
+	if node.Parameters != nil {
+		intArgReg := 0
+		floatArgReg := 0
+		for _, param := range node.Parameters {
+			if param.Name == nil {
+				continue // Should not happen in valid code
+			}
+			paramName := param.Name.Name
+
+			// Use the helper to determine the parameter's type
+			vtype := t.typeNodeToVarType(param.Type)
+			if vtype == TypeVoid {
+				panic(fmt.Sprintf("Function parameter '%s' cannot be void", paramName))
+			}
+
+			// Define the symbol in the current scope
+			mangledName := t.defineSymbol(paramName, vtype)
+
+			// Per ARM64 calling convention, first args are in registers.
+			// We'll store them to memory (following the pattern for local vars in this compiler)
+			switch vtype {
+			case TypeInt, TypeBool, TypeString: // Strings are pointers (int-like)
+				if intArgReg < 8 {
+					// Allocate in .data section and store from register
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad 0", mangledName))
+					t.addAsm("    // Store param '%s' from register X%d to memory", paramName, intArgReg)
+					t.addAsm("    LDR X9, =%s", mangledName)
+					t.addAsm("    STR X%d, [X9]", intArgReg)
+					intArgReg++
+				} else {
+					// TODO: Handle parameters passed on the stack
+				}
+			case TypeFloat:
+				if floatArgReg < 8 {
+					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double 0.0", mangledName))
+					t.addAsm("    // Store param '%s' from register D%d to memory", paramName, floatArgReg)
+					t.addAsm("    LDR X9, =%s", mangledName)
+					t.addAsm("    STR D%d, [X9]", floatArgReg)
+					floatArgReg++
+				} else {
+					// TODO: Handle float parameters passed on the stack
+				}
+			}
+		}
+	}
 
 	if node.Body != nil {
 		node.Body.Accept(t)
@@ -333,9 +400,11 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 	// Epilogue for main/_start should handle process exit.
 	// For other functions, it's a standard return.
 	if node.Name != nil {
-		t.addAsm(".L%s_epilogue:", node.Name.Name) // Label for potential jumps to epilogue
+		epilogueLabel := fmt.Sprintf(".L%s_epilogue", node.Name.Name)
+		t.addAsm(epilogueLabel + ":") // Label for potential jumps to epilogue
 	} else {
-		t.addAsm(".L_anonymous_func_%d_epilogue:", t.stringCounter-1) // Match potential anonymous label
+		epilogueLabel := fmt.Sprintf(".L_anonymous_func_%d_epilogue", t.stringCounter-1)
+		t.addAsm(epilogueLabel + ":") // Match potential anonymous label
 	}
 	t.addAsm("    MOV W0, #0")              // Default return code 0 for other functions
 	t.addAsm("    LDP X29, X30, [SP], #16") // Restore FP, LR from stack, post-increment SP by 16
@@ -363,133 +432,54 @@ func (t *Translator) VisitParameterDecl(node *ast.ParameterDecl) interface{} {
 
 func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting VarDecl")
+		fmt.Printf("Translator.Visiting VarDecl for '%s'\n", node.Name.Name)
 	}
-	if node.Name == nil {
-		return nil // Should not happen in a valid program
-	}
-	varName := node.Name.Name
 
-	// --- LOCAL VARIABLE ---
-	if t.currentFuncDef != nil {
-		if node.Initializer == nil {
-			// This case should be caught by the parser for `:=` declarations.
-			// For `var x int`, it's valid but we'll handle it as uninitialized.
-			// V requires initialization, so we can probably panic.
-			// For now, let's stick to what the old code did: default initialize.
-		}
-
-		// 1. Evaluate the initializer expression.
-		result := node.Initializer.Accept(t).(ExpressionResult)
-
-		// 2. Define the symbol in the current scope.
-		mangledName := t.defineSymbol(varName, result.Type)
-
-		// 3. Allocate space for the variable in the .data section.
-		// (A real compiler would use the stack here)
-		switch result.Type {
-		case TypeInt:
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad 0", mangledName))
-		case TypeBool:
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .byte 0", mangledName))
-		case TypeFloat:
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double 0.0", mangledName))
-		case TypeString:
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad 0", mangledName)) // For pointer
-		default:
-			panic(fmt.Sprintf("Unsupported variable type for allocation: %s", result.Type))
-		}
-
-		// 4. Generate code to store the initial value.
-		addrReg := t.acquireIntRegister()
-		t.addAsm("    LDR X%d, =%s", addrReg, mangledName)
-		switch result.Type {
-		case TypeInt, TypeString: // String is a pointer (X reg), Int uses X reg for 64-bit
-			t.addAsm("    STR X%d, [X%d]", result.Reg, addrReg)
-		case TypeBool:
-			t.addAsm("    STRB W%d, [X%d]", result.Reg, addrReg) // Store byte for bool
-		case TypeFloat:
-			t.addAsm("    STR D%d, [X%d]", result.Reg, addrReg)
-		}
-		t.releaseIntRegister(addrReg)
-
-		// 5. Release the register that held the expression result.
-		if result.Type == TypeFloat {
-			t.releaseFloatRegister(result.Reg)
-		} else {
-			t.releaseIntRegister(result.Reg)
-		}
+	// Must have an initializer for this implementation
+	if node.Initializer == nil {
+		// This could be extended to handle zero-value initialization
 		return nil
 	}
 
-	// --- GLOBAL VARIABLE ---
-	if node.Initializer != nil {
-		// Global variables must be initialized with constant literals.
-		switch init := node.Initializer.(type) {
-		case *ast.IntegerLiteral:
-			mangledName := t.defineSymbol(varName, TypeInt)
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad %s", mangledName, init.Value))
-		case *ast.UnaryExpr:
-			if init.Operator == "-" {
-				if intLit, ok := init.Right.(*ast.IntegerLiteral); ok {
-					mangledName := t.defineSymbol(varName, TypeInt)
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad -%s", mangledName, intLit.Value))
-				} else {
-					panic("Global initializer with unary '-' must be an integer literal.")
-				}
-			} else {
-				panic("Unsupported unary operator for global initializer.")
-			}
-		case *ast.StringLiteral:
-			strLabel := t.addStringData(init.Value)
-			mangledName := t.defineSymbol(varName, TypeString)
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad %s", mangledName, strLabel))
-		case *ast.FloatLiteral:
-			mangledName := t.defineSymbol(varName, TypeFloat)
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double %s", mangledName, init.Value))
-		case *ast.BoolLiteral:
-			val := "0"
-			if init.Value {
-				val = "1"
-			}
-			mangledName := t.defineSymbol(varName, TypeBool)
-			t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .byte %s", mangledName, val))
-		default:
-			panic(fmt.Sprintf("Global variable '%s' must be initialized with a constant literal, not %T", varName, init))
-		}
-	} else {
-		// Uninitialized global variable.
-		if node.ExplicitType != nil {
-			if typeName, ok := node.ExplicitType.(*ast.TypeName); ok {
-				switch typeName.Name {
-				case "int":
-					mangledName := t.defineSymbol(varName, TypeInt)
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad 0", mangledName))
-				case "float64":
-					mangledName := t.defineSymbol(varName, TypeFloat)
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .double 0.0", mangledName))
-				case "string":
-					strLabel := t.addStringData("\"\"") // Empty string
-					mangledName := t.defineSymbol(varName, TypeString)
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .quad %s", mangledName, strLabel))
-				case "bool":
-					mangledName := t.defineSymbol(varName, TypeBool)
-					t.dataSection = append(t.dataSection, fmt.Sprintf("%s: .byte 0", mangledName)) // 0 for false
-				default:
-					panic(fmt.Sprintf("Unknown type '%s' for global variable '%s'", typeName.Name, varName))
-				}
-			} else {
-				panic(fmt.Sprintf("Unsupported type declaration for global variable '%s'", varName))
-			}
-		} else {
-			panic(fmt.Sprintf("Global variable '%s' must have an explicit type or an initializer.", varName))
-		}
+	// Evaluate the initializer expression first
+	initResult := node.Initializer.Accept(t)
+	res, ok := initResult.(ExpressionResult)
+	if !ok {
+		panic(fmt.Sprintf("Initializer for %s did not return an ExpressionResult", node.Name.Name))
+	}
+
+	// Define the symbol with the type from the expression result
+	mangledName := t.defineSymbol(node.Name.Name, res.Type)
+
+	// Add variable to .data section, initializing to zero/null.
+	switch res.Type {
+	case TypeInt, TypeBool:
+		t.addData(fmt.Sprintf("%s: .quad 0", mangledName))
+	case TypeFloat:
+		t.addData(fmt.Sprintf("%s: .double 0.0", mangledName))
+	case TypeString:
+		t.addData(fmt.Sprintf("%s: .quad 0", mangledName)) // Store pointer, init to null
+	}
+
+	// Store the result from the register into the variable's memory location
+	t.addAsm("    // Storing initializer for %s", node.Name.Name)
+	t.addAsm("    LDR X9, =%s", mangledName) // Load address of variable into X9
+
+	switch res.Type {
+	case TypeInt, TypeBool:
+		t.addAsm("    STR W%d, [X9]", res.Reg) // Store from W-register
+		t.releaseIntRegister(res.Reg)
+	case TypeFloat:
+		t.addAsm("    STR D%d, [X9]", res.Reg) // Store from D-register
+		t.releaseFloatRegister(res.Reg)
+	case TypeString:
+		t.addAsm("    STR X%d, [X9]", res.Reg) // Store from X-register (pointer)
+		t.releaseIntRegister(res.Reg)
 	}
 
 	return nil
 }
 
-// ...
 // Statements
 func (t *Translator) VisitBlockStmt(node *ast.BlockStmt) interface{} {
 	if t.DebugMode {
@@ -619,8 +609,16 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 			}
 		case TypeFloat:
 			t.addAsm("    // --- Start of compound assignment (+=) to %s ---", varName)
+			// Create a label for 1.0 in the data section.
+			oneLabel := t.newLabel("float_one")
+			t.addData(fmt.Sprintf("%s: .double 1.0", oneLabel))
+
 			t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
 			t.addAsm("    LDR D8, [X10]")           // Load current value of var into float register D8
+
+			t.addAsm("    LDR X11, =%s", oneLabel)  // Load address of 1.0
+			t.addAsm("    LDR D9, [X11]")           // Load 1.0 into D9
+
 			switch rhs := node.Right.(type) {
 			case *ast.IntegerLiteral:
 				t.addAsm("    MOV W11, #%s", rhs.Value) // Load immediate integer value
@@ -683,8 +681,16 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 			}
 		case TypeFloat:
 			t.addAsm("    // --- Start of compound assignment (-=) to %s ---", varName)
+			// Create a label for 1.0 in the data section.
+			oneLabel := t.newLabel("float_one")
+			t.addData(fmt.Sprintf("%s: .double 1.0", oneLabel))
+
 			t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
 			t.addAsm("    LDR D8, [X10]")           // Load current value of var into float register D8
+
+			t.addAsm("    LDR X11, =%s", oneLabel)  // Load address of 1.0
+			t.addAsm("    LDR D9, [X11]")           // Load 1.0 into D9
+
 			switch rhs := node.Right.(type) {
 			case *ast.IntegerLiteral:
 				t.addAsm("    MOV W11, #%s", rhs.Value) // Load immediate integer value
@@ -719,11 +725,105 @@ func (t *Translator) VisitExpressionStmt(node *ast.ExpressionStmt) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting ExpressionStmt")
 	}
-	// The result of the expression (if any) is usually discarded in an expression statement.
-	// For example, a function call made for its side effect.
-	node.Expression.Accept(t)
+	// Evaluate the expression. This is typically a function call.
+	result := node.Expression.Accept(t)
+
+	// If the expression returned a value (e.g., a function call that returns something),
+	// we need to release the register it was stored in, since the result is not being used.
+	if res, ok := result.(ExpressionResult); ok {
+		switch res.Type {
+		case TypeInt, TypeBool, TypeString:
+			t.releaseIntRegister(res.Reg)
+		case TypeFloat:
+			t.releaseFloatRegister(res.Reg)
+		}
+	}
 	return nil
 }
+
+func (t *Translator) VisitBreakStmt(node *ast.BreakStmt) interface{} {
+	if t.DebugMode {
+		fmt.Println("Translator.Visiting BreakStmt")
+	}
+	// TODO: Implement BreakStmt translation
+	return nil
+}
+
+func (t *Translator) VisitContinueStmt(node *ast.ContinueStmt) interface{} {
+	if t.DebugMode {
+		fmt.Println("Translator.Visiting ContinueStmt")
+	}
+	// TODO: Implement ContinueStmt translation
+	return nil
+}
+
+func (t *Translator) VisitIncDecStmt(node *ast.IncDecStmt) interface{} {
+	if t.DebugMode {
+		fmt.Println("Translator.Visiting IncDecStmt")
+	}
+
+	// Get the variable name from the left side (LHS)
+	var varName string
+	if ident, ok := node.LValue.(*ast.IdentifierExpr); ok {
+		varName = ident.Name
+	} else {
+		fmt.Fprintf(os.Stderr, "Unsupported L-value in inc/dec statement: %T\n", node.LValue)
+		return nil
+	}
+
+	// We need to know the type of the variable to use the correct store instruction.
+	mangledName, varType, typeExists := t.lookupSymbol(varName)
+	if !typeExists {
+		fmt.Fprintf(os.Stderr, "Inc/dec on undeclared variable: %s\n", varName)
+		return nil
+	}
+
+	switch varType {
+	case TypeInt:
+		t.addAsm("    // --- Start of integer inc/dec on %s ---", varName)
+		t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
+		t.addAsm("    LDR W11, [X10]")           // Load current value of var
+
+		switch node.Operator {
+		case "++":
+			t.addAsm("    ADD W11, W11, #1") // Increment
+		case "--":
+			t.addAsm("    SUB W11, W11, #1") // Decrement
+		}
+
+		t.addAsm("    STR W11, [X10]") // Store result back
+		t.addAsm("    // --- End of integer inc/dec on %s ---", varName)
+		t.addAsm("")
+	case TypeFloat:
+		t.addAsm("    // --- Start of float inc/dec on %s ---", varName)
+		// Create a label for 1.0 in the data section.
+		oneLabel := t.newLabel("float_one")
+		t.addData(fmt.Sprintf("%s: .double 1.0", oneLabel))
+
+		t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
+		t.addAsm("    LDR D8, [X10]")           // Load current value of var into float register D8
+
+		t.addAsm("    LDR X11, =%s", oneLabel)  // Load address of 1.0
+		t.addAsm("    LDR D9, [X11]")           // Load 1.0 into D9
+
+		switch node.Operator {
+		case "++":
+			t.addAsm("    FADD D8, D8, D9") // Increment
+		case "--":
+			t.addAsm("    FSUB D8, D8, D9") // Decrement
+		}
+
+		t.addAsm("    STR D8, [X10]") // Store result back
+		t.addAsm("    // --- End of float inc/dec on %s ---", varName)
+		t.addAsm("")
+	default:
+		fmt.Fprintf(os.Stderr, "Inc/dec on unsupported type for variable: %s (%s)\n", varName, varType)
+		return nil
+	}
+
+	return nil
+}
+
 
 func (t *Translator) VisitIfStmt(node *ast.IfStmt) interface{} {
 	if t.DebugMode {
@@ -802,100 +902,54 @@ func (t *Translator) VisitReturnStmt(node *ast.ReturnStmt) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting ReturnStmt")
 	}
-	// TODO: Implement ReturnStmt translation
+
 	if node.Value != nil {
-		node.Value.Accept(t)
+		result := node.Value.Accept(t)
+		if result == nil {
+			// This can happen for calls to functions that return void, like println
+			// Check the function's return type. If it's void, this is okay.
+			if t.currentFuncDef != nil && t.typeNodeToVarType(t.currentFuncDef.ReturnType) == TypeVoid {
+				// This is a return from a void function, but with a value (e.g. return println()).
+				// This should probably be a semantic error caught earlier, but for now, we just ignore the value.
+			} else {
+				panic("Return expression evaluated to nil for a non-void function")
+			}
+		} else {
+			exprResult, ok := result.(ExpressionResult)
+			if !ok {
+				panic(fmt.Sprintf("Return expression did not evaluate to an ExpressionResult, but to %T", result))
+			}
+
+			// Move the result to the appropriate return register
+			switch exprResult.Type {
+			case TypeInt, TypeString, TypeBool:
+				// ARM64 calling convention returns integer/pointer types in X0
+				t.addAsm("    MOV X0, X%d", exprResult.Reg)
+				t.releaseIntRegister(exprResult.Reg)
+			case TypeFloat:
+				// ARM64 calling convention returns float types in D0
+				t.addAsm("    FMOV D0, D%d", exprResult.Reg)
+				t.releaseFloatRegister(exprResult.Reg)
+			default:
+				// This includes TypeVoid, which shouldn't happen here because node.Value is not nil.
+				panic(fmt.Sprintf("Unsupported return type: %s", exprResult.Type))
+			}
+		}
 	}
-	return nil
-}
 
-func (t *Translator) VisitBreakStmt(node *ast.BreakStmt) interface{} {
-	if t.DebugMode {
-		fmt.Println("Translator.Visiting BreakStmt")
-	}
-	// TODO: Implement BreakStmt translation
-	return nil
-}
-
-func (t *Translator) VisitContinueStmt(node *ast.ContinueStmt) interface{} {
-	if t.DebugMode {
-		fmt.Println("Translator.Visiting ContinueStmt")
-	}
-	// TODO: Implement ContinueStmt translation
-	return nil
-}
-
-// Statements (continued)
-
-func (t *Translator) VisitIncDecStmt(node *ast.IncDecStmt) interface{} {
-	if t.DebugMode {
-		fmt.Println("Translator.Visiting IncDecStmt")
-	}
-
-	// Get the variable name from the left side (LHS)
-	var varName string
-	if ident, ok := node.LValue.(*ast.IdentifierExpr); ok {
-		varName = ident.Name
+	// After handling the return value (or if there is none), jump to the function's epilogue
+	// to restore the stack and return properly.
+	if t.currentFuncDef != nil {
+		epilogueLabel := fmt.Sprintf(".L%s_epilogue", t.currentFuncDef.Name.Name)
+		t.addAsm("    B " + epilogueLabel)
 	} else {
-		fmt.Fprintf(os.Stderr, "Unsupported L-value in inc/dec statement: %T\n", node.LValue)
-		return nil
-	}
-
-	// We need to know the type of the variable to use the correct store instruction.
-	mangledName, varType, typeExists := t.lookupSymbol(varName)
-	if !typeExists {
-		fmt.Fprintf(os.Stderr, "Inc/dec on undeclared variable: %s\n", varName)
-		return nil
-	}
-
-	switch varType {
-	case TypeInt:
-		t.addAsm("    // --- Start of integer inc/dec on %s ---", varName)
-		t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
-		t.addAsm("    LDR W11, [X10]")           // Load current value of var
-
-		switch node.Operator {
-		case "++":
-			t.addAsm("    ADD W11, W11, #1") // Increment
-		case "--":
-			t.addAsm("    SUB W11, W11, #1") // Decrement
-		}
-
-		t.addAsm("    STR W11, [X10]") // Store result back
-		t.addAsm("    // --- End of integer inc/dec on %s ---", varName)
-		t.addAsm("")
-	case TypeFloat:
-		t.addAsm("    // --- Start of float inc/dec on %s ---", varName)
-		// Create a label for 1.0 in the data section.
-		oneLabel := t.newLabel("float_one")
-		t.addData(fmt.Sprintf("%s: .double 1.0", oneLabel))
-
-		t.addAsm("    LDR X10, =%s", mangledName) // Load address of the variable
-		t.addAsm("    LDR D8, [X10]")           // Load current value of var
-
-		t.addAsm("    LDR X11, =%s", oneLabel)  // Load address of 1.0
-		t.addAsm("    LDR D9, [X11]")           // Load 1.0 into D9
-
-		switch node.Operator {
-		case "++":
-			t.addAsm("    FADD D8, D8, D9") // Increment
-		case "--":
-			t.addAsm("    FSUB D8, D8, D9") // Decrement
-		}
-
-		t.addAsm("    STR D8, [X10]") // Store result back
-		t.addAsm("    // --- End of float inc/dec on %s ---", varName)
-		t.addAsm("")
-	default:
-		fmt.Fprintf(os.Stderr, "Inc/dec on unsupported type for variable: %s (%s)\n", varName, varType)
-		return nil
+		// This might happen in the global scope, which is an error.
+		panic("Return statement outside of a function")
 	}
 
 	return nil
 }
 
-// ExpressionResult holds the result of an expression evaluation.
-// It contains the register where the result is stored and its type.
 type ExpressionResult struct {
 	Reg  int
 	Type VarType
@@ -1262,6 +1316,8 @@ func (t *Translator) VisitTypeConversionExpr(node *ast.TypeConversionExpr) inter
 	return nil
 }
 
+
+
 func (t *Translator) VisitCompositeLiteralExpr(node *ast.CompositeLiteralExpr) interface{} {
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting CompositeLiteralExpr")
@@ -1299,6 +1355,7 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 		fmt.Println("Translator.Visiting CallExpr")
 	}
 
+	// Check for the special 'println' function
 	if ident, ok := node.Function.(*ast.IdentifierExpr); ok && ident.Name == "println" {
 		if t.DebugMode {
 			fmt.Printf("Translator.VisitCallExpr: Visiting call to identifier: '%s'\n", ident.Name)
@@ -1307,25 +1364,135 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 		t.addAsm("    // --- Start of println call ---")
 		t.handlePrintln(node.Arguments)
 		t.addAsm("    // --- End of println call ---")
-		return nil
+		return nil // println does not return a value
+	}
+
+	// --- General Function Call ---
+	ident, ok := node.Function.(*ast.IdentifierExpr)
+	if !ok {
+		// For now, we only handle direct function calls like `myFunc()`
+		panic("Unhandled function call type")
 	}
 
 	if t.DebugMode {
-		if ident, ok := node.Function.(*ast.IdentifierExpr); ok {
-			fmt.Printf("Translator.VisitCallExpr: Unhandled call to identifier: '%s'\n", ident.Name)
+		fmt.Printf("Translator.VisitCallExpr: Visiting call to identifier: '%s'\n", ident.Name)
+	}
+
+	// 1. Evaluate arguments and move them to argument registers
+	intArgRegs := []string{"X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7"}
+	floatArgRegs := []string{"D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7"}
+	intArgCount := 0
+	floatArgCount := 0
+
+	var usedArgRegsInt []int
+	var usedArgRegsFloat []int
+
+	for _, arg := range node.Arguments {
+		result := arg.Accept(t)
+		argResult, isExprResult := result.(ExpressionResult)
+		if !isExprResult {
+			panic(fmt.Sprintf("Argument to function %s did not evaluate to an ExpressionResult", ident.Name))
+		}
+
+		switch argResult.Type {
+		case TypeInt, TypeString, TypeBool:
+			if intArgCount < len(intArgRegs) {
+				t.addAsm(fmt.Sprintf("    MOV %s, X%d", intArgRegs[intArgCount], argResult.Reg))
+				usedArgRegsInt = append(usedArgRegsInt, argResult.Reg)
+				intArgCount++
+			} else {
+				t.releaseIntRegister(argResult.Reg) // Release if we can't pass it
+			}
+		case TypeFloat:
+			if floatArgCount < len(floatArgRegs) {
+				t.addAsm(fmt.Sprintf("    FMOV %s, D%d", floatArgRegs[floatArgCount], argResult.Reg))
+				usedArgRegsFloat = append(usedArgRegsFloat, argResult.Reg)
+				floatArgCount++
+			} else {
+				t.releaseFloatRegister(argResult.Reg) // Release if we can't pass it
+			}
 		}
 	}
-	return nil
+
+	// Release registers used for arguments now that they've been moved
+	for _, reg := range usedArgRegsInt {
+		t.releaseIntRegister(reg)
+	}
+	for _, reg := range usedArgRegsFloat {
+		t.releaseFloatRegister(reg)
+	}
+
+	// 2. Emit the call instruction
+	t.addAsm(fmt.Sprintf("    BL %s", ident.Name))
+
+	// 3. Handle the return value
+	funcInfo, exists := t.funcSyms[ident.Name]
+	if !exists {
+		panic(fmt.Sprintf("Call to undefined function: %s", ident.Name))
+	}
+
+	returnType := t.typeNodeToVarType(funcInfo.ReturnType)
+
+	if returnType == TypeVoid {
+		return nil
+	}
+
+	var resultReg int
+	switch returnType {
+	case TypeInt, TypeString, TypeBool:
+		resultReg = t.acquireIntRegister()
+		t.addAsm(fmt.Sprintf("    MOV X%d, X0", resultReg))
+	case TypeFloat:
+		resultReg = t.acquireFloatRegister()
+		t.addAsm(fmt.Sprintf("    FMOV D%d, D0", resultReg))
+	default:
+		// For other types (arrays, structs), the address is returned in X0.
+		// We treat it as an integer-sized register for now.
+		resultReg = t.acquireIntRegister()
+		t.addAsm(fmt.Sprintf("    MOV X%d, X0", resultReg))
+	}
+
+	return ExpressionResult{
+		Reg:  resultReg,
+		Type: returnType,
+	}
 }
 
-func (t *Translator) handlePrintln(args []ast.Expression) {
+// typeNodeToVarType converts an ast.TypeNode to a VarType.
+func (t *Translator) typeNodeToVarType(typeNode ast.TypeNode) VarType {
+	if typeNode == nil {
+		// This typically means a void return type for a function.
+		return TypeVoid
+	}
+
+	switch n := typeNode.(type) {
+	case *ast.PrimitiveTypeNode:
+		switch n.Kind {
+		case ast.IntKind:
+			return TypeInt
+		case ast.Float64Kind:
+			return TypeFloat
+		case ast.StringKind:
+			return TypeString
+		case ast.BoolKind:
+			return TypeBool
+		default:
+			panic(fmt.Sprintf("Unsupported primitive type kind: %v", n.Kind))
+		}
+	// TODO: Add cases for other types like Array, Struct, etc. as they are implemented.
+	default:
+		panic(fmt.Sprintf("Unsupported type node: %T", n))
+	}
+}
+
+func (t *Translator) handlePrintln(args []ast.Expression) interface{} {
 	var formatString strings.Builder
 	var evaluatedArgs []ExpressionResult
 
 	// 1. Evaluate all expressions first and build the format string.
 	for i, arg := range args {
 		if i > 0 {
-			formatString.WriteString(" ") // Add space between arguments
+			formatString.WriteString(" ")
 		}
 
 		if strLit, ok := arg.(*ast.StringLiteral); ok {
@@ -1334,6 +1501,7 @@ func (t *Translator) handlePrintln(args []ast.Expression) {
 		} else {
 			result := arg.Accept(t).(ExpressionResult)
 			evaluatedArgs = append(evaluatedArgs, result)
+
 			switch result.Type {
 			case TypeInt:
 				formatString.WriteString("%d")
@@ -1410,6 +1578,8 @@ func (t *Translator) handlePrintln(args []ast.Expression) {
 
 	// 5. Call printf.
 	t.addAsm("    BL printf")
+
+	return nil
 }
 
 func (t *Translator) VisitIntegerLiteral(node *ast.IntegerLiteral) interface{} {

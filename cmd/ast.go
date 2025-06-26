@@ -398,18 +398,24 @@ func (v *AstBuilder) VisitFunctionDeclaration(ctx *parser.FunctionDeclarationCon
 
 	var returnType ast.TypeNode
 	if returnTypeCtx := ctx.ReturnType(); returnTypeCtx != nil {
-		returnTypeNodeRet := v.Visit(returnTypeCtx)
-		if rt, ok := returnTypeNodeRet.(ast.TypeNode); ok {
-			returnType = rt
-		} else if returnTypeNodeRet != nil {
-			// TODO: Log if returnTypeNodeRet is not nil but not ast.TypeNode
-			if v.DebugMode {
-				fmt.Fprintf(os.Stderr, "AstBuilder.VisitFunctionDeclaration: Expected ast.TypeNode from VisitReturnType, got %T for '%s'\n", returnTypeNodeRet, returnTypeCtx.GetText())
+		// The `returnType` rule in the grammar is `returnType: type_`.
+		// We must visit the underlying `type_` context to get the ast.TypeNode.
+		if typeCtx := returnTypeCtx.Type_(); typeCtx != nil {
+			returnTypeNodeRet := typeCtx.Accept(v)
+			if typeNode, ok := returnTypeNodeRet.(ast.TypeNode); ok {
+				returnType = typeNode
+			} else if returnTypeNodeRet != nil {
+				if v.DebugMode {
+					fmt.Fprintf(os.Stderr, "AstBuilder.VisitFunctionDeclaration: Visiting return type did not yield ast.TypeNode. Got %T for '%s'\n", returnTypeNodeRet, returnTypeCtx.GetText())
+				}
+			} else {
+				if v.DebugMode {
+					fmt.Fprintf(os.Stderr, "AstBuilder.VisitFunctionDeclaration: Visiting return type returned nil for '%s'\n", returnTypeCtx.GetText())
+				}
 			}
 		} else {
-			// TODO: Log if returnTypeNodeRet is nil (meaning VisitReturnType returned nil)
 			if v.DebugMode {
-				fmt.Fprintf(os.Stderr, "AstBuilder.VisitFunctionDeclaration: VisitReturnType returned nil for '%s'\n", returnTypeCtx.GetText())
+				fmt.Fprintf(os.Stderr, "AstBuilder.VisitFunctionDeclaration: ReturnTypeContext exists but its Type_() is nil for '%s'\n", returnTypeCtx.GetText())
 			}
 		}
 	}

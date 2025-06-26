@@ -19,6 +19,7 @@ const (
 	TypeString
 	TypeBool
 	TypeVoid
+	TypeSlice
 	TypeArray
 	TypeStruct
 )
@@ -468,7 +469,7 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 		t.addData(fmt.Sprintf("%s: .quad 0", mangledName))
 	case TypeFloat:
 		t.addData(fmt.Sprintf("%s: .double 0.0", mangledName))
-	case TypeString:
+	case TypeString, TypeSlice:
 		t.addData(fmt.Sprintf("%s: .quad 0", mangledName)) // Store pointer, init to null
 	}
 
@@ -484,8 +485,8 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 	case TypeFloat:
 		t.addAsm("    STR D%d, [X%d]", res.Reg, addrReg) // Store from D-register
 		t.releaseFloatRegister(res.Reg)
-	case TypeString:
-		t.addAsm("    STR X%d, [X%d]", res.Reg, addrReg) // Store from X-register (pointer)
+	case TypeString, TypeSlice:
+		t.addAsm("    STR X%d, [X%d]", res.Reg, addrReg) // Store 64-bit pointer (pointer)
 		t.releaseIntRegister(res.Reg)
 	}
 	t.releaseIntRegister(addrReg)
@@ -1547,8 +1548,54 @@ func (t *Translator) VisitCompositeLiteralExpr(node *ast.CompositeLiteralExpr) i
 	if t.DebugMode {
 		fmt.Println("Translator.Visiting CompositeLiteralExpr")
 	}
-	// TODO: Implement CompositeLiteralExpr translation
-	return nil
+
+	// For now, we only support slice literals, e.g., []int{1, 2, 3}
+	sliceType, ok := node.Type.(*ast.SliceTypeNode)
+	if !ok {
+		panic("Currently only slice composite literals are supported")
+	}
+
+	// Determine the element type
+	elementType := t.typeNodeToVarType(sliceType.ElementType)
+	if elementType != TypeInt {
+		panic("Only slices of integers are currently supported")
+	}
+
+	// Create a label for the static data
+	dataLabel := t.newLabel("slice_data")
+
+	// Emit the slice data to the .data section
+	var elementValues []string
+	for _, element := range node.Elements {
+		lit, ok := element.Value.(*ast.IntegerLiteral)
+		if !ok {
+			panic("Slice elements must be integer literals for now")
+		}
+		// lit.Value is a string representation of the number, so use it directly.
+		elementValues = append(elementValues, lit.Value)
+	}
+	dataValues := strings.Join(elementValues, ", ")
+	t.addData(fmt.Sprintf("%s: .quad %s", dataLabel, dataValues))
+
+	// Now, we need to create a slice descriptor in memory.
+	// A slice is a struct { data_ptr, len, cap }.
+	// We'll allocate this descriptor on the stack or in the data section.
+	// For a simple static initializer, data section is fine.
+
+	sliceStructLabel := t.newLabel("slice_descriptor")
+	t.addData(fmt.Sprintf("%s:", sliceStructLabel))
+	t.addData(fmt.Sprintf("    .quad %s  // Pointer to data", dataLabel))
+	t.addData(fmt.Sprintf("    .quad %d    // Length", len(node.Elements)))
+	t.addData(fmt.Sprintf("    .quad %d    // Capacity", len(node.Elements)))
+
+	// Load the address of the slice descriptor into a register
+	reg := t.acquireIntRegister()
+	t.addAsm("    LDR X%d, =%s", reg, sliceStructLabel)
+
+	return ExpressionResult{
+		Reg:  reg,
+		Type: TypeSlice, // Special type for the slice descriptor pointer
+	}
 }
 
 func (t *Translator) VisitCompositeElement(node *ast.CompositeElement) interface{} {

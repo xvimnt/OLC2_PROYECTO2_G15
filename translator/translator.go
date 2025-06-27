@@ -61,6 +61,7 @@ type Translator struct {
 	hasStringFormatStr bool              // Tracks if the string format string has been added
 	trueStrLabel       string            // Label for the "true" string literal
 	falseStrLabel      string            // Label for the "false" string literal
+	emptyStrLabel      string            // Label for the "" string literal
 	currentFuncDef     *ast.FunctionDecl // Keep track of the current function being defined
 	funcSyms           map[string]*ast.FunctionDecl
 	DebugMode          bool
@@ -100,6 +101,8 @@ func NewTranslator(debugMode bool) *Translator {
 		hasStringFormatStr: false,
 		trueStrLabel:       "",
 		falseStrLabel:      "",
+		emptyStrLabel:      "",
+
 		currentFuncDef:     nil,
 		funcSyms:           make(map[string]*ast.FunctionDecl),
 		DebugMode:          debugMode,
@@ -447,9 +450,33 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 		fmt.Printf("Translator.Visiting VarDecl for '%s'\n", node.Name.Name)
 	}
 
-	// Must have an initializer for this implementation
+	// Handle declaration without initializer (e.g., var x int)
 	if node.Initializer == nil {
-		// This could be extended to handle zero-value initialization
+		varType := t.typeNodeToVarType(node.ExplicitType)
+		if varType == TypeUnknown || varType == TypeVoid {
+			panic(fmt.Sprintf("Cannot declare variable '%s' with invalid type", node.Name.Name))
+		}
+
+		mangledName := t.defineSymbol(node.Name.Name, varType)
+
+		// Add variable to .data section, initializing to its zero-value.
+		t.addAsm("    // Declaring %s without initializer", node.Name.Name)
+		switch varType {
+		case TypeInt, TypeBool:
+			t.addData(fmt.Sprintf("%s: .quad 0", mangledName))
+		case TypeFloat:
+			// .double requires alignment
+			t.addData(".align 3")
+			t.addData(fmt.Sprintf("%s: .double 0.0", mangledName))
+		case TypeString, TypeSlice: // Pointers
+			if t.emptyStrLabel == "" {
+				// Create the global empty string if it doesn't exist yet.
+				t.emptyStrLabel = t.addStringData("")
+			}
+			t.addData(fmt.Sprintf("%s: .quad %s", mangledName, t.emptyStrLabel)) // Initialize to pointer to empty string
+		default:
+			panic(fmt.Sprintf("Unhandled zero-value initialization for type %s", varType))
+		}
 		return nil
 	}
 

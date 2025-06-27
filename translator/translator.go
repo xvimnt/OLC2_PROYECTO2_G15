@@ -913,6 +913,10 @@ func (t *Translator) VisitSwitchStmt(node *ast.SwitchStmt) interface{} {
 	}
 
 	endSwitchLabel := t.newLabel("switch_end")
+
+	// Push the end label onto the break stack. This allows 'break' statements
+	// within the switch to jump to the end of the switch.
+	t.breakLabels = append(t.breakLabels, endSwitchLabel)
 	var defaultLabel string
 	if node.Default != nil {
 		defaultLabel = t.newLabel("switch_default")
@@ -997,6 +1001,9 @@ func (t *Translator) VisitSwitchStmt(node *ast.SwitchStmt) interface{} {
 	// 7. End of switch
 	t.addAsm("%s:", endSwitchLabel)
 	t.releaseIntRegister(switchExprResult.Reg)
+
+	// Pop the break label now that the switch is done.
+	t.breakLabels = t.breakLabels[:len(t.breakLabels)-1]
 
 	return nil
 }

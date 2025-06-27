@@ -306,6 +306,7 @@ func main() {
 	btnAbrir := widget.NewButtonWithIcon("Abrir", theme.FolderOpenIcon(), nil)
 	btnGuardar := widget.NewButtonWithIcon("Guardar", theme.DocumentSaveIcon(), nil)
 	btnEjecutar := widget.NewButtonWithIcon("Ejecutar", theme.MediaPlayIcon(), nil)
+	btnCompilar := widget.NewButtonWithIcon("Compilar", theme.ComputerIcon(), nil)
 	btnErrores := widget.NewButtonWithIcon("Errores", theme.ErrorIcon(), nil)
 	btnSimbolos := widget.NewButtonWithIcon("Tabla de Símbolos", theme.InfoIcon(), nil)
 	btnAST := widget.NewButtonWithIcon("AST", theme.VisibilityIcon(), nil)
@@ -356,6 +357,57 @@ func main() {
 			return
 		}
 		consola.SetText(string(output))
+	}
+	
+	btnCompilar.OnTapped = func() {
+		consola.SetText("Iniciando compilación a ARM64...\n")
+		
+		// Crear archivo temporal con el código
+		tmpFile, err := ioutil.TempFile("", "*.v")
+		if err != nil {
+			consola.SetText("Error creando archivo temporal: " + err.Error())
+			return
+		}
+		defer os.Remove(tmpFile.Name())
+		tmpFile.WriteString(editor.Text)
+		tmpFile.Close()
+
+		// Paso 1: Traducir a ARM64 Assembly
+		consola.SetText(consola.Text + "Paso 1/3: Traduciendo a ARM64 Assembly...\n")
+		cmd := exec.Command("../OLC2_PROYECTO2_G15", "translate", tmpFile.Name())
+		cmd.Dir = ".." // Cambiar al directorio padre donde está el Makefile
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			consola.SetText(consola.Text + "Error en traducción:\n" + string(output))
+			return
+		}
+		consola.SetText(consola.Text + "✓ Traducción completada (output.s generado)\n")
+
+		// Paso 2: Compilar Assembly a binario ARM64
+		consola.SetText(consola.Text + "Paso 2/3: Compilando Assembly a binario ARM64...\n")
+		cmd = exec.Command("make", "build-arm")
+		cmd.Dir = ".." // Ejecutar en el directorio padre
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			consola.SetText(consola.Text + "Error en compilación ARM64:\n" + string(output))
+			return
+		}
+		consola.SetText(consola.Text + "✓ Compilación ARM64 completada (output.exe generado)\n")
+
+		// Paso 3: Ejecutar el binario ARM64 con QEMU
+		consola.SetText(consola.Text + "Paso 3/3: Ejecutando binario ARM64 con QEMU...\n")
+		cmd = exec.Command("make", "run-arm")
+		cmd.Dir = ".." // Ejecutar en el directorio padre
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			consola.SetText(consola.Text + "Error ejecutando con QEMU:\n" + string(output))
+			return
+		}
+		
+		consola.SetText(consola.Text + "✓ Ejecución ARM64 completada\n")
+		consola.SetText(consola.Text + "--- Salida del programa ARM64 ---\n")
+		consola.SetText(consola.Text + string(output))
+		consola.SetText(consola.Text + "\n--- Compilación y ejecución ARM64 finalizada ---")
 	}
 	btnErrores.OnTapped = func() {
 		tmpFile, err := ioutil.TempFile("", "*.v")
@@ -453,7 +505,7 @@ func main() {
 	}
 
 	barra := container.NewHBox(
-		btnAbrir, btnGuardar, btnEjecutar, btnErrores, btnSimbolos, btnAST, btnIntegrantes,
+		btnAbrir, btnGuardar, btnEjecutar, btnCompilar, btnErrores, btnSimbolos, btnAST, btnIntegrantes,
 	)
 	barraBG := canvas.NewRectangle(color.White)
 

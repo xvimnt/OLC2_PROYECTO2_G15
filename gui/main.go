@@ -25,6 +25,14 @@ import (
 // Tema claro personalizado
 type myTheme struct{}
 
+// Función auxiliar para obtener el mínimo de dos enteros
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func (m *myTheme) Font(s fyne.TextStyle) fyne.Resource { return theme.DefaultTheme().Font(s) }
 func (m *myTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {
 	switch n {
@@ -286,7 +294,7 @@ Luis Andres Calvo Arreaga`,
 // --- MAIN Fyne personalizado ---
 
 func main() {
-	myApp := app.New()
+	myApp := app.NewWithID("com.vlangcherry.ide")
 	myApp.Settings().SetTheme(&myTheme{})
 	myWindow := myApp.NewWindow("VLang Cherry IDE")
 
@@ -298,7 +306,7 @@ func main() {
 
 	consola := widget.NewMultiLineEntry()
 	consola.SetPlaceHolder("Consola de salida...")
-	consola.Disable()
+	consola.Wrapping = fyne.TextWrapWord
 	consolaScroller := container.NewVScroll(consola)
 	consolaScroller.SetMinSize(fyne.NewSize(800, 250))
 	consolaScrollerBG := canvas.NewRectangle(color.White)
@@ -306,7 +314,7 @@ func main() {
 	btnAbrir := widget.NewButtonWithIcon("Abrir", theme.FolderOpenIcon(), nil)
 	btnGuardar := widget.NewButtonWithIcon("Guardar", theme.DocumentSaveIcon(), nil)
 	btnEjecutar := widget.NewButtonWithIcon("Ejecutar", theme.MediaPlayIcon(), nil)
-	btnCompilar := widget.NewButtonWithIcon("Compilar", theme.ComputerIcon(), nil)
+	btnTraducir := widget.NewButtonWithIcon("Traducir", theme.DocumentIcon(), nil)
 	btnErrores := widget.NewButtonWithIcon("Errores", theme.ErrorIcon(), nil)
 	btnSimbolos := widget.NewButtonWithIcon("Tabla de Símbolos", theme.InfoIcon(), nil)
 	btnAST := widget.NewButtonWithIcon("AST", theme.VisibilityIcon(), nil)
@@ -341,27 +349,8 @@ func main() {
 		saveDialog.Show()
 	}
 	btnEjecutar.OnTapped = func() {
-		tmpFile, err := ioutil.TempFile("", "*.v")
-		if err != nil {
-			consola.SetText("Error creando archivo temporal")
-			return
-		}
-		defer os.Remove(tmpFile.Name())
-		tmpFile.WriteString(editor.Text)
-		tmpFile.Close()
+		consola.SetText("Ejecutando código...\n")
 
-		cmd := exec.Command("../OLC2_PROYECTO2_G15", "run", tmpFile.Name())
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			consola.SetText("Error al ejecutar:\n" + string(output))
-			return
-		}
-		consola.SetText(string(output))
-	}
-	
-	btnCompilar.OnTapped = func() {
-		consola.SetText("Iniciando compilación a ARM64...\n")
-		
 		// Crear archivo temporal con el código
 		tmpFile, err := ioutil.TempFile("", "*.v")
 		if err != nil {
@@ -372,43 +361,106 @@ func main() {
 		tmpFile.WriteString(editor.Text)
 		tmpFile.Close()
 
-		// Paso 1: Traducir a ARM64 Assembly
-		consola.SetText(consola.Text + "Paso 1/3: Traduciendo a ARM64 Assembly...\n")
-		cmd := exec.Command("../OLC2_PROYECTO2_G15", "translate", tmpFile.Name())
-		cmd.Dir = ".." // Cambiar al directorio padre donde está el Makefile
+		// Traducir a ARM64 Assembly
+		cmd := exec.Command(".\\OLC2_PROYECTO2_G15.exe", "translate", tmpFile.Name())
+		cmd.Dir = ".." // Cambiar al directorio padre donde está el ejecutable
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			consola.SetText(consola.Text + "Error en traducción:\n" + string(output))
+			consola.SetText("Error en traducción: " + err.Error())
 			return
 		}
-		consola.SetText(consola.Text + "✓ Traducción completada (output.s generado)\n")
 
-		// Paso 2: Compilar Assembly a binario ARM64
-		consola.SetText(consola.Text + "Paso 2/3: Compilando Assembly a binario ARM64...\n")
+		// Compilar Assembly a binario ARM64
 		cmd = exec.Command("make", "build-arm")
 		cmd.Dir = ".." // Ejecutar en el directorio padre
 		output, err = cmd.CombinedOutput()
 		if err != nil {
-			consola.SetText(consola.Text + "Error en compilación ARM64:\n" + string(output))
+			consola.SetText("Error en compilación ARM64:\n" + string(output))
 			return
 		}
-		consola.SetText(consola.Text + "✓ Compilación ARM64 completada (output.exe generado)\n")
 
-		// Paso 3: Ejecutar el binario ARM64 con QEMU
-		consola.SetText(consola.Text + "Paso 3/3: Ejecutando binario ARM64 con QEMU...\n")
+		// Ejecutar el binario ARM64 con QEMU
 		cmd = exec.Command("make", "run-arm")
 		cmd.Dir = ".." // Ejecutar en el directorio padre
 		output, err = cmd.CombinedOutput()
 		if err != nil {
-			consola.SetText(consola.Text + "Error ejecutando con QEMU:\n" + string(output))
+			consola.SetText("Error ejecutando con QEMU:\n" + string(output))
 			return
 		}
 		
-		consola.SetText(consola.Text + "✓ Ejecución ARM64 completada\n")
-		consola.SetText(consola.Text + "--- Salida del programa ARM64 ---\n")
-		consola.SetText(consola.Text + string(output))
-		consola.SetText(consola.Text + "\n--- Compilación y ejecución ARM64 finalizada ---")
+		// Filtrar el mensaje de QEMU y solo mostrar la salida del programa
+		outputStr := string(output)
+		if strings.Contains(outputStr, "Running ARM executable with QEMU...") {
+			// Buscar la línea después del mensaje de QEMU
+			lines := strings.Split(outputStr, "\n")
+			var filteredLines []string
+			skipNext := false
+			for _, line := range lines {
+				if strings.Contains(line, "Running ARM executable with QEMU...") {
+					skipNext = true
+					continue
+				}
+				if !skipNext {
+					filteredLines = append(filteredLines, line)
+				} else {
+					// Después del mensaje de QEMU, incluir todas las líneas
+					filteredLines = append(filteredLines, line)
+					skipNext = false
+				}
+			}
+			outputStr = strings.Join(filteredLines, "\n")
+		}
+		
+		consola.SetText(outputStr)
 	}
+	
+	btnTraducir.OnTapped = func() {
+		// Crear archivo temporal con el código
+		tmpFile, err := ioutil.TempFile("", "*.v")
+		if err != nil {
+			consola.SetText("Error creando archivo temporal: " + err.Error())
+			return
+		}
+		defer os.Remove(tmpFile.Name())
+		tmpFile.WriteString(editor.Text)
+		tmpFile.Close()
+
+		// Traducir a ARM64 Assembly
+		cmd := exec.Command(".\\OLC2_PROYECTO2_G15.exe", "translate", tmpFile.Name())
+		cmd.Dir = ".." // Cambiar al directorio padre donde está el ejecutable
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			consola.SetText("Error en traducción: " + err.Error())
+			return
+		}
+		
+		// Filtrar las líneas de debug y solo mostrar el código Assembly
+		outputStr := string(output)
+		lines := strings.Split(outputStr, "\n")
+		var assemblyLines []string
+		inAssembly := false
+		
+		for _, line := range lines {
+			// Iniciar captura después de "--- Generated assembly code ---"
+			if strings.Contains(line, "--- Generated assembly code ---") {
+				inAssembly = true
+				continue
+			}
+			// Terminar captura antes de "--- End of assembly code ---"
+			if strings.Contains(line, "--- End of assembly code ---") {
+				inAssembly = false
+				continue
+			}
+			// Capturar solo las líneas del assembly
+			if inAssembly {
+				assemblyLines = append(assemblyLines, line)
+			}
+		}
+		
+		// Mostrar solo el código Assembly
+		consola.SetText(strings.Join(assemblyLines, "\n"))
+	}
+	
 	btnErrores.OnTapped = func() {
 		tmpFile, err := ioutil.TempFile("", "*.v")
 		if err != nil {
@@ -505,7 +557,7 @@ func main() {
 	}
 
 	barra := container.NewHBox(
-		btnAbrir, btnGuardar, btnEjecutar, btnCompilar, btnErrores, btnSimbolos, btnAST, btnIntegrantes,
+		btnAbrir, btnGuardar, btnEjecutar, btnTraducir, btnErrores, btnSimbolos, btnAST, btnIntegrantes,
 	)
 	barraBG := canvas.NewRectangle(color.White)
 

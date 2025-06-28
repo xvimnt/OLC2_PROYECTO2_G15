@@ -18,7 +18,7 @@ ANTLR_JAR=antlr-4.12.0-complete.jar
 ANTLR_URL=https://www.antlr.org/download/antlr-4.12.0-complete.jar
 
 # ARM Cross-compilation parameters
-ARM_GCC=aarch64-none-linux-gnu-gcc
+ARM_GCC=aarch64-linux-gnu-gcc
 ARM_FLAGS=-static
 ARM_OUTPUT=output.exe
 ARM_SOURCE=output.s
@@ -34,7 +34,7 @@ build:
 # Build the ARM executable from assembly
 build-arm:
 	@echo "Building ARM executable from $(ARM_SOURCE)..."
-	$(ARM_GCC) $(ARM_FLAGS) -o $(ARM_OUTPUT) $(ARM_SOURCE)
+	wsl -d Ubuntu $(ARM_GCC) $(ARM_FLAGS) -o $(ARM_OUTPUT) $(ARM_SOURCE)
  
 # Install QEMU automatically using PowerShell script
 install-qemu:

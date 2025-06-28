@@ -297,6 +297,11 @@ func main() {
 	myApp := app.NewWithID("com.vlangcherry.ide")
 	myApp.Settings().SetTheme(&myTheme{})
 	myWindow := myApp.NewWindow("VLang Cherry IDE")
+	
+	// Configurar directorio de trabajo para evitar errores de URI
+	if wd, err := os.Getwd(); err == nil {
+		os.Chdir(wd)
+	}
 
 	editor := widget.NewMultiLineEntry()
 	editor.SetPlaceHolder("Escribe tu código VLang Cherry aquí...")
@@ -430,12 +435,19 @@ func main() {
 		cmd.Dir = ".." // Cambiar al directorio padre donde está el ejecutable
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			consola.SetText("Error en traducción: " + err.Error())
+			consola.SetText("Error en traducción:\n" + string(output) + "\nError: " + err.Error())
 			return
 		}
 		
 		// Filtrar las líneas de debug y solo mostrar el código Assembly
 		outputStr := string(output)
+		
+		// Si no hay contenido de assembly, mostrar toda la salida para debug
+		if !strings.Contains(outputStr, "--- Generated assembly code ---") {
+			consola.SetText("Salida completa para debug:\n" + outputStr)
+			return
+		}
+		
 		lines := strings.Split(outputStr, "\n")
 		var assemblyLines []string
 		inAssembly := false

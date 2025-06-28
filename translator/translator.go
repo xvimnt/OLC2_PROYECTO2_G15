@@ -57,6 +57,7 @@ type Translator struct {
 	labelCounter       int               // For generating unique labels
 	needsPrintf        bool              // Tracks if printf is used (for .extern printf)
 	needsAtoi          bool              // Tracks if atoi is used
+	needsAtof          bool              // Tracks if atof is used
 	hasIntFormatStr    bool              // Tracks if the integer format string has been added
 	hasFloatFormatStr  bool              // Tracks if the float format string has been added
 	hasStringFormatStr bool              // Tracks if the string format string has been added
@@ -98,6 +99,7 @@ func NewTranslator(debugMode bool) *Translator {
 		labelCounter:       0,
 		needsPrintf:        false,
 		needsAtoi:          false,
+		needsAtof:          false,
 		hasIntFormatStr:    false,
 		hasFloatFormatStr:  false,
 		hasStringFormatStr: false,
@@ -251,6 +253,9 @@ func (t *Translator) GetAssembly() []string {
 		}
 		if t.needsStrcmp {
 			finalAsm = append(finalAsm, ".extern strcmp")
+		}
+		if t.needsAtof {
+			finalAsm = append(finalAsm, ".extern atof")
 		}
 		if t.needsAtoi {
 			finalAsm = append(finalAsm, ".extern atoi")
@@ -507,22 +512,19 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 
 	// Store the result from the register into the variable's memory location
 	t.addAsm("    // Storing initializer for %s", node.Name.Name)
-	addrReg := t.acquireIntRegister()
-	t.addAsm("    LDR X%d, =%s", addrReg, mangledName) // Load address of variable into a temporary register
+	t.addAsm("    LDR X9, =%s", mangledName) // Load address of variable into X9
 
 	switch res.Type {
 	case TypeInt, TypeBool:
-		t.addAsm("    STR W%d, [X%d]", res.Reg, addrReg) // Store from W-register
+		t.addAsm("    STR W%d, [X9]", res.Reg) // Store from W-register
 		t.releaseIntRegister(res.Reg)
 	case TypeFloat:
-		t.addAsm("    STR D%d, [X%d]", res.Reg, addrReg) // Store from D-register
+		t.addAsm("    STR D%d, [X9]", res.Reg) // Store from D-register
 		t.releaseFloatRegister(res.Reg)
 	case TypeString, TypeSlice:
-		t.addAsm("    STR X%d, [X%d]", res.Reg, addrReg) // Store 64-bit pointer (pointer)
+		t.addAsm("    STR X%d, [X9]", res.Reg) // Store from X-register (pointer)
 		t.releaseIntRegister(res.Reg)
 	}
-	t.releaseIntRegister(addrReg)
-
 	return nil
 }
 
@@ -657,7 +659,11 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 		}
 
 		// 3. Evaluate the RHS
-		rightResult := node.Right.Accept(t).(ExpressionResult)
+		rightResultRaw := node.Right.Accept(t)
+		rightResult, ok := rightResultRaw.(ExpressionResult)
+		if !ok {
+			panic("RHS of compound assignment did not return an ExpressionResult")
+		}
 
 		// 4. Acquire a register to hold the address of the variable.
 		addrReg := t.acquireIntRegister()
@@ -720,10 +726,11 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 				}
 			case "%=":
 				if rightResult.Type == TypeInt {
-					// result = a - (a / b) * b
+					// result = a - (a/n) * n
 					quotientReg := t.acquireIntRegister()
 					t.addAsm("    SDIV X%d, X%d, X%d", quotientReg, currentValReg, rightResult.Reg)
-					t.addAsm("    MSUB X%d, X%d, X%d, X%d", currentValReg, quotientReg, rightResult.Reg, currentValReg)
+					t.addAsm("    MUL X%d, X%d, X%d", quotientReg, quotientReg, rightResult.Reg)
+					t.addAsm("    SUB X%d, X%d, X%d", currentValReg, currentValReg, quotientReg)
 					t.releaseIntRegister(quotientReg)
 				} else {
 					panic(fmt.Sprintf("Type mismatch for '%%=' operator: %s and %s", varType, rightResult.Type))
@@ -1239,6 +1246,51 @@ func (t *Translator) handleShortCircuit(node *ast.BinaryExpr) interface{} {
 	return ExpressionResult{Reg: resultReg, Type: TypeBool}
 }
 
+// concatenateStrings generates assembly to concatenate two strings.
+// It uses C standard library functions (strlen, malloc, strcpy, strcat).
+func (t *Translator) concatenateStrings(left, right ExpressionResult) ExpressionResult {
+	t.addAsm("    // --- String Concatenation ---")
+
+	// Save the pointers to the two strings on the stack, as the registers will be reused.
+	t.addAsm("    SUB SP, SP, #16")
+	t.addAsm("    STP X%d, X%d, [SP]", left.Reg, right.Reg)
+	t.releaseIntRegister(left.Reg)
+	t.releaseIntRegister(right.Reg)
+
+	// 1. Get length of left string (pointer is at [SP, #0])
+	t.addAsm("    LDR X0, [SP, #0]")
+	t.addAsm("    BL strlen")
+	t.addAsm("    MOV X9, X0") // Save len1 in X9
+
+	// 2. Get length of right string (pointer is at [SP, #8])
+	t.addAsm("    LDR X0, [SP, #8]")
+	t.addAsm("    BL strlen")
+	t.addAsm("    MOV X10, X0") // Save len2 in X10
+
+	// 3. Malloc new buffer: len1 + len2 + 1
+	t.addAsm("    ADD X0, X9, X10")
+	t.addAsm("    ADD X0, X0, #1")
+	t.addAsm("    BL malloc")
+	resultReg := t.acquireIntRegister()
+	t.addAsm("    MOV X%d, X0", resultReg) // Save new buffer pointer in resultReg
+
+	// 4. strcpy(new_buffer, left_string)
+	t.addAsm("    LDR X1, [SP, #0]")      // 2nd arg: src (left_string pointer)
+	t.addAsm("    MOV X0, X%d", resultReg) // 1st arg: dest (new_buffer pointer)
+	t.addAsm("    BL strcpy")
+
+	// 5. strcat(new_buffer, right_string)
+	t.addAsm("    LDR X1, [SP, #8]")      // 2nd arg: src (right_string pointer)
+	t.addAsm("    MOV X0, X%d", resultReg) // 1st arg: dest (new_buffer pointer)
+	t.addAsm("    BL strcat")
+
+	// 6. Clean up stack
+	t.addAsm("    ADD SP, SP, #16")
+
+	// 7. Return the new string
+	return ExpressionResult{Reg: resultReg, Type: TypeString}
+}
+
 func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 	if t.DebugMode {
 		fmt.Printf("Translator.Visiting BinaryExpr: %s\n", node.Operator)
@@ -1431,60 +1483,6 @@ func (t *Translator) VisitBinaryExpr(node *ast.BinaryExpr) interface{} {
 	default:
 		panic(fmt.Sprintf("Unsupported type in binary expression: %s", leftResult.Type))
 	}
-}
-
-func (t *Translator) concatenateStrings(left, right ExpressionResult) ExpressionResult {
-	t.addAsm("    // --- Start of string concatenation ---")
-
-	// Save callee-saved registers we will use as temporaries (X19, X20, X21)
-	// and the link register X30.
-	t.addAsm("    STP X19, X20, [SP, #-16]!")
-	t.addAsm("    STP X21, X30, [SP, #-16]!")
-
-	// Move original string pointers into safe callee-saved registers
-	t.addAsm("    MOV X19, X%d  // Pointer to left string", left.Reg)
-	t.addAsm("    MOV X20, X%d  // Pointer to right string", right.Reg)
-
-	// 1. Get length of left string
-	t.addAsm("    MOV X0, X19")
-	t.addAsm("    BL strlen")
-	t.addAsm("    MOV X21, X0  // Store length of left string")
-
-	// 2. Get length of right string
-	t.addAsm("    MOV X0, X20")
-	t.addAsm("    BL strlen")
-
-	// 3. Allocate memory for new string (len(left) + len(right) + 1)
-	t.addAsm("    ADD X0, X0, X21  // Total length")
-	t.addAsm("    ADD X0, X0, #1     // Add 1 for null terminator")
-	t.addAsm("    BL malloc")
-	// X0 now holds the pointer to the new buffer. Save it in X21.
-	t.addAsm("    MOV X21, X0      // X21 now holds the new string pointer")
-
-	// 4. Copy left string into new buffer
-	t.addAsm("    MOV X0, X21      // 1st arg for strcpy: destination")
-	t.addAsm("    MOV X1, X19      // 2nd arg for strcpy: source (left string)")
-	t.addAsm("    BL strcpy")
-
-	// 5. Append right string to new buffer
-	t.addAsm("    MOV X0, X21      // 1st arg for strcat: destination")
-	t.addAsm("    MOV X1, X20      // 2nd arg for strcat: source (right string)")
-	t.addAsm("    BL strcat")
-
-	// The final concatenated string is in X21. Move it to a fresh register from our pool.
-	newStringReg := t.acquireIntRegister()
-	t.addAsm("    MOV X%d, X21", newStringReg)
-
-	// Restore callee-saved registers and link register
-	t.addAsm("    LDP X21, X30, [SP], #16")
-	t.addAsm("    LDP X19, X20, [SP], #16")
-
-	// Release the original registers
-	t.releaseIntRegister(left.Reg)
-	t.releaseIntRegister(right.Reg)
-
-	t.addAsm("    // --- End of string concatenation ---")
-	return ExpressionResult{Reg: newStringReg, Type: TypeString}
 }
 
 func (t *Translator) VisitUnaryExpr(node *ast.UnaryExpr) interface{} {
@@ -1687,6 +1685,8 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 		return nil // println does not return a value
 	case "Atoi":
 		return t.handleAtoi(node.Arguments)
+	case "parseFloat":
+		return t.handleParseFloat(node.Arguments)
 	}
 
 	// ... (rest of the code remains the same)
@@ -1799,6 +1799,42 @@ func (t *Translator) typeNodeToVarType(typeNode ast.TypeNode) VarType {
 	default:
 		panic(fmt.Sprintf("Unsupported type node: %T", n))
 	}
+}
+
+func (t *Translator) handleParseFloat(args []ast.Expression) interface{} {
+	if len(args) != 1 {
+		panic("parseFloat expects exactly one argument")
+	}
+
+	argResult := args[0].Accept(t)
+	if argResult == nil {
+		panic("Argument to parseFloat is nil")
+	}
+
+	res, ok := argResult.(ExpressionResult)
+	if !ok {
+		panic(fmt.Sprintf("Unexpected result type from argument expression: %T", argResult))
+	}
+
+	if res.Type != TypeString {
+		panic("parseFloat expects a string argument")
+	}
+
+	t.needsAtof = true
+
+	// The register from res.Reg holds the address of the string.
+	// Per ARM64 calling convention, the first argument to a function is in X0.
+	t.addAsm("    MOV X0, X%d", res.Reg)
+	t.releaseIntRegister(res.Reg) // Release the register that held the string address
+
+	// Call atof
+	t.addAsm("    BL atof")
+
+	// The result is in D0. We move it to a new temporary register.
+	resultReg := t.acquireFloatRegister()
+	t.addAsm("    FMOV D%d, D0", resultReg)
+
+	return ExpressionResult{Reg: resultReg, Type: TypeFloat}
 }
 
 func (t *Translator) handleAtoi(args []ast.Expression) interface{} {

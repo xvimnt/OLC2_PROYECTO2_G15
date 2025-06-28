@@ -27,21 +27,23 @@ const (
 func (v VarType) String() string {
 	switch v {
 	case TypeInt:
-		return "Int"
+		return "int"
 	case TypeFloat:
-		return "Float"
+		return "float64"
 	case TypeString:
-		return "String"
+		return "string"
 	case TypeBool:
-		return "Bool"
+		return "bool"
 	case TypeVoid:
-		return "Void"
+		return "void"
+	case TypeSlice:
+		return "[]int" // Note: This is a simplified representation for now
 	case TypeArray:
-		return "Array"
+		return "array" // Note: Simplified
 	case TypeStruct:
-		return "Struct"
+		return "struct" // Note: Simplified
 	default:
-		return "Unknown"
+		return "unknown"
 	}
 }
 
@@ -510,21 +512,44 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 		t.addData(fmt.Sprintf("%s: .quad 0", mangledName)) // Store pointer, init to null
 	}
 
-	// Store the result from the register into the variable's memory location
-	t.addAsm("    // Storing initializer for %s", node.Name.Name)
-	t.addAsm("    LDR X9, =%s", mangledName) // Load address of variable into X9
-
+	// Spill the initializer result to the stack to prevent register conflicts.
+	t.addAsm("    SUB SP, SP, #16")
 	switch res.Type {
-	case TypeInt, TypeBool:
-		t.addAsm("    STR W%d, [X9]", res.Reg) // Store from W-register
-		t.releaseIntRegister(res.Reg)
 	case TypeFloat:
-		t.addAsm("    STR D%d, [X9]", res.Reg) // Store from D-register
+		t.addAsm("    STR D%d, [SP]", res.Reg)
 		t.releaseFloatRegister(res.Reg)
-	case TypeString, TypeSlice:
-		t.addAsm("    STR X%d, [X9]", res.Reg) // Store from X-register (pointer)
+	default: // Int, String, Bool, Slice, etc.
+		t.addAsm("    STR X%d, [SP]", res.Reg)
 		t.releaseIntRegister(res.Reg)
 	}
+
+	// Acquire registers for storing the value from stack to variable
+	addrReg := t.acquireIntRegister()
+	valReg := t.acquireIntRegister() // Use a separate register for the value
+
+	t.addAsm("    LDR X%d, =%s", addrReg, mangledName)
+
+	switch res.Type {
+	case TypeInt:
+		t.addAsm("    LDR W%d, [SP]", valReg)
+		t.addAsm("    STR W%d, [X%d]", valReg, addrReg)
+	case TypeFloat:
+		valFloatReg := t.acquireFloatRegister()
+		t.addAsm("    LDR D%d, [SP]", valFloatReg)
+		t.addAsm("    STR D%d, [X%d]", valFloatReg, addrReg)
+		t.releaseFloatRegister(valFloatReg)
+	case TypeString, TypeSlice:
+		t.addAsm("    LDR X%d, [SP]", valReg)
+		t.addAsm("    STR X%d, [X%d]", valReg, addrReg)
+	case TypeBool:
+		t.addAsm("    LDRB W%d, [SP]", valReg)
+		t.addAsm("    STRB W%d, [X%d]", valReg, addrReg)
+	}
+
+	// Release registers and clean up stack
+	t.releaseIntRegister(addrReg)
+	t.releaseIntRegister(valReg)
+	t.addAsm("    ADD SP, SP, #16")
 	return nil
 }
 
@@ -577,22 +602,44 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 			panic(fmt.Sprintf("Unsupported type for variable declaration: %s", res.Type))
 		}
 
-		// Store the result from the register into the variable's memory location
-		t.addAsm("    // Storing initializer for new variable %s", varName.Name)
-		t.addAsm("    LDR X9, =%s", mangledName) // Load address of variable into X9
-
+		// Spill the initializer result to the stack to prevent register conflicts.
+		t.addAsm("    SUB SP, SP, #16")
 		switch res.Type {
-		case TypeInt, TypeBool:
-			t.addAsm("    STR W%d, [X9]", res.Reg) // Store from W-register
-			t.releaseIntRegister(res.Reg)
 		case TypeFloat:
-			t.addAsm("    STR D%d, [X9]", res.Reg) // Store from D-register
+			t.addAsm("    STR D%d, [SP]", res.Reg)
 			t.releaseFloatRegister(res.Reg)
-		case TypeString:
-			t.addAsm("    STR X%d, [X9]", res.Reg) // Store from X-register (pointer)
+		default: // Int, String, Bool, Slice, etc.
+			t.addAsm("    STR X%d, [SP]", res.Reg)
 			t.releaseIntRegister(res.Reg)
 		}
 
+		// Acquire registers for storing the value from stack to variable
+		addrReg := t.acquireIntRegister()
+		valReg := t.acquireIntRegister() // Use a separate register for the value
+
+		t.addAsm("    LDR X%d, =%s", addrReg, mangledName)
+
+		switch res.Type {
+		case TypeInt:
+			t.addAsm("    LDR W%d, [SP]", valReg)
+			t.addAsm("    STR W%d, [X%d]", valReg, addrReg)
+		case TypeFloat:
+			valFloatReg := t.acquireFloatRegister()
+			t.addAsm("    LDR D%d, [SP]", valFloatReg)
+			t.addAsm("    STR D%d, [X%d]", valFloatReg, addrReg)
+			t.releaseFloatRegister(valFloatReg)
+		case TypeString:
+			t.addAsm("    LDR X%d, [SP]", valReg)
+			t.addAsm("    STR X%d, [X%d]", valReg, addrReg)
+		case TypeBool:
+			t.addAsm("    LDRB W%d, [SP]", valReg)
+			t.addAsm("    STRB W%d, [X%d]", valReg, addrReg)
+		}
+
+		// Release registers and clean up stack
+		t.releaseIntRegister(addrReg)
+		t.releaseIntRegister(valReg)
+		t.addAsm("    ADD SP, SP, #16")
 	} else if node.Operator == "=" {
 		// --- Simple Assignment (=) ---
 		// Lookup the existing variable
@@ -602,17 +649,17 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 		}
 
 		// Evaluate the RHS
-		rightResult := node.Right.Accept(t)
-		res, ok := rightResult.(ExpressionResult)
+		rightResultRaw := node.Right.Accept(t)
+		rightResult, ok := rightResultRaw.(ExpressionResult)
 		if !ok {
-			panic(fmt.Sprintf("RHS of assignment for %s did not return an ExpressionResult", varName.Name))
+			panic("RHS of assignment did not return an ExpressionResult")
 		}
 
 		// Basic type check
-		if varType != res.Type {
+		if varType != rightResult.Type {
 			// Allow int to float promotion
-			if !(varType == TypeFloat && res.Type == TypeInt) {
-				panic(fmt.Sprintf("Type mismatch in assignment to %s. Expected %s, got %s", varName.Name, varType, res.Type))
+			if !(varType == TypeFloat && rightResult.Type == TypeInt) {
+				panic(fmt.Sprintf("Type mismatch in assignment to %s. Expected %s, got %s", varName.Name, varType, rightResult.Type))
 			}
 		}
 
@@ -622,29 +669,49 @@ func (t *Translator) VisitAssignStmt(node *ast.AssignStmt) interface{} {
 		t.addAsm("    LDR X%d, =%s", addrReg, mangledName) // Load address of variable into addrReg
 
 		// Handle type promotion if necessary (int to float)
-		if varType == TypeFloat && res.Type == TypeInt {
+		if varType == TypeFloat && rightResult.Type == TypeInt {
 			t.addAsm("    // Promoting RHS from INT to FLOAT for assignment")
 			promotedFloatReg := t.acquireFloatRegister()
-			t.addAsm("    SCVTF D%d, W%d", promotedFloatReg, res.Reg)
-			t.releaseIntRegister(res.Reg)
-			res = ExpressionResult{Reg: promotedFloatReg, Type: TypeFloat}
+			t.addAsm("    SCVTF D%d, W%d", promotedFloatReg, rightResult.Reg)
+			t.releaseIntRegister(rightResult.Reg)
+			rightResult = ExpressionResult{Reg: promotedFloatReg, Type: TypeFloat}
 		}
 
-		// Store the result from the register into the variable's memory location
-		switch res.Type {
-		case TypeInt, TypeBool:
-			t.addAsm("    STR W%d, [X%d]", res.Reg, addrReg)
-			t.releaseIntRegister(res.Reg)
+		// Spill the right-hand side result to the stack to prevent register conflicts.
+		t.addAsm("    SUB SP, SP, #16")
+		switch rightResult.Type {
 		case TypeFloat:
-			t.addAsm("    STR D%d, [X%d]", res.Reg, addrReg)
-			t.releaseFloatRegister(res.Reg)
-		case TypeString:
-			t.addAsm("    STR X%d, [X%d]", res.Reg, addrReg)
-			t.releaseIntRegister(res.Reg)
+			t.addAsm("    STR D%d, [SP]", rightResult.Reg)
+			t.releaseFloatRegister(rightResult.Reg)
+		default: // Int, String, Bool, Slice, etc.
+			t.addAsm("    STR X%d, [SP]", rightResult.Reg)
+			t.releaseIntRegister(rightResult.Reg)
 		}
 
-		// Release the address register
+		// Acquire registers for storing the value from stack to variable
+		valReg := t.acquireIntRegister() // Use a separate register for the value
+
+		switch varType {
+		case TypeInt:
+			t.addAsm("    LDR W%d, [SP]", valReg)
+			t.addAsm("    STR W%d, [X%d]", valReg, addrReg)
+		case TypeFloat:
+			valFloatReg := t.acquireFloatRegister()
+			t.addAsm("    LDR D%d, [SP]", valFloatReg)
+			t.addAsm("    STR D%d, [X%d]", valFloatReg, addrReg)
+			t.releaseFloatRegister(valFloatReg)
+		case TypeString:
+			t.addAsm("    LDR X%d, [SP]", valReg)
+			t.addAsm("    STR X%d, [X%d]", valReg, addrReg)
+		case TypeBool:
+			t.addAsm("    LDRB W%d, [SP]", valReg)
+			t.addAsm("    STRB W%d, [X%d]", valReg, addrReg)
+		}
+
+		// Release registers and clean up stack
 		t.releaseIntRegister(addrReg)
+		t.releaseIntRegister(valReg)
+		t.addAsm("    ADD SP, SP, #16")
 	} else { // Compound assignment operators
 		// 1. Get the variable name from the left side (LHS)
 		varName, ok := node.Left.(*ast.IdentifierExpr)
@@ -1567,6 +1634,12 @@ func (t *Translator) VisitIdentifierExpr(node *ast.IdentifierExpr) interface{} {
 		t.addAsm("    LDRB W%d, [X%d]", valReg, addrReg)
 		t.releaseIntRegister(addrReg) // Free the address register.
 		return ExpressionResult{Reg: valReg, Type: TypeBool}
+	case TypeSlice:
+		valReg := t.acquireIntRegister()
+		// For slices, we load the pointer to the slice descriptor.
+		t.addAsm("    LDR X%d, [X%d]", valReg, addrReg)
+		t.releaseIntRegister(addrReg)
+		return ExpressionResult{Reg: valReg, Type: TypeSlice}
 	default:
 		t.releaseIntRegister(addrReg) // Release register even on panic
 		panic(fmt.Sprintf("Loading for type %s not implemented for identifier '%s'", varType, node.Name))
@@ -1687,6 +1760,8 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 		return t.handleAtoi(node.Arguments)
 	case "parseFloat":
 		return t.handleParseFloat(node.Arguments)
+	case "typeof":
+		return t.handleTypeOf(node.Arguments)
 	}
 
 	// ... (rest of the code remains the same)
@@ -1799,6 +1874,38 @@ func (t *Translator) typeNodeToVarType(typeNode ast.TypeNode) VarType {
 	default:
 		panic(fmt.Sprintf("Unsupported type node: %T", n))
 	}
+}
+
+func (t *Translator) handleTypeOf(args []ast.Expression) interface{} {
+	if len(args) != 1 {
+		panic("typeof() expects exactly one argument")
+	}
+
+	// Evaluate the expression to find its type.
+	result := args[0].Accept(t).(ExpressionResult)
+
+	// The result register isn't needed, just its type. Release the register.
+	switch result.Type {
+	case TypeInt, TypeString, TypeBool, TypeSlice:
+		t.releaseIntRegister(result.Reg)
+	case TypeFloat:
+		t.releaseFloatRegister(result.Reg)
+	// Note: Slices and other complex types might need special handling for register release.
+	// For now, we assume simple types or types whose registers can be released.
+	}
+
+	// Get the string representation of the type, e.g., "int", "float64".
+	typeString := result.Type.String()
+
+	// Add the type string to the .data section.
+	label := t.addStringData(typeString)
+
+	// Load the address of the string into a new register.
+	reg := t.acquireIntRegister()
+	t.addAsm("    LDR X%d, =%s", reg, label)
+
+	// Return the result, which is a pointer to the string.
+	return ExpressionResult{Reg: reg, Type: TypeString}
 }
 
 func (t *Translator) handleParseFloat(args []ast.Expression) interface{} {

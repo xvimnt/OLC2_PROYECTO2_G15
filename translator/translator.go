@@ -56,6 +56,7 @@ type Translator struct {
 	stringCounter      int               // For generating unique string labels
 	labelCounter       int               // For generating unique labels
 	needsPrintf        bool              // Tracks if printf is used (for .extern printf)
+	needsAtoi          bool              // Tracks if atoi is used
 	hasIntFormatStr    bool              // Tracks if the integer format string has been added
 	hasFloatFormatStr  bool              // Tracks if the float format string has been added
 	hasStringFormatStr bool              // Tracks if the string format string has been added
@@ -96,6 +97,7 @@ func NewTranslator(debugMode bool) *Translator {
 		stringCounter:      0,
 		labelCounter:       0,
 		needsPrintf:        false,
+		needsAtoi:          false,
 		hasIntFormatStr:    false,
 		hasFloatFormatStr:  false,
 		hasStringFormatStr: false,
@@ -249,6 +251,9 @@ func (t *Translator) GetAssembly() []string {
 		}
 		if t.needsStrcmp {
 			finalAsm = append(finalAsm, ".extern strcmp")
+		}
+		if t.needsAtoi {
+			finalAsm = append(finalAsm, ".extern atoi")
 		}
 		if t.needsPrintf {
 			finalAsm = append(finalAsm, ".extern printf")
@@ -1674,14 +1679,17 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 
 	// Handle special built-in functions
 	switch funcName {
-	case "println", "print":
+	case "print", "println":
 		t.needsPrintf = true
 		t.addAsm("    // --- Start of %s call ---", funcName)
 		t.handlePrintln(node.Arguments)
 		t.addAsm("    // --- End of %s call ---", funcName)
 		return nil // println does not return a value
+	case "Atoi":
+		return t.handleAtoi(node.Arguments)
 	}
 
+	// ... (rest of the code remains the same)
 	// --- General Function Call for user-defined functions ---
 	funcDef, exists := t.funcSyms[funcName]
 	if !exists {
@@ -1791,6 +1799,42 @@ func (t *Translator) typeNodeToVarType(typeNode ast.TypeNode) VarType {
 	default:
 		panic(fmt.Sprintf("Unsupported type node: %T", n))
 	}
+}
+
+func (t *Translator) handleAtoi(args []ast.Expression) interface{} {
+	if len(args) != 1 {
+		panic("Atoi expects exactly one argument")
+	}
+
+	argResult := args[0].Accept(t)
+	if argResult == nil {
+		panic("Argument to Atoi is nil")
+	}
+
+	res, ok := argResult.(ExpressionResult)
+	if !ok {
+		panic(fmt.Sprintf("Unexpected result type from argument expression: %T", argResult))
+	}
+
+	if res.Type != TypeString {
+		panic("Atoi expects a string argument")
+	}
+
+	t.needsAtoi = true
+
+	// The register from res.Reg holds the address of the string.
+	// Per ARM64 calling convention, the first argument to a function is in X0.
+	t.addAsm("    MOV X0, X%d", res.Reg)
+	t.releaseIntRegister(res.Reg) // Release the register that held the string address
+
+	// Call atoi
+	t.addAsm("    BL atoi")
+
+	// The result is in X0. We move it to a new temporary register.
+	resultReg := t.acquireIntRegister()
+	t.addAsm("    MOV X%d, X0", resultReg)
+
+	return ExpressionResult{Reg: resultReg, Type: TypeInt}
 }
 
 func (t *Translator) handlePrintln(args []ast.Expression) interface{} {

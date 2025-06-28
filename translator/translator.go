@@ -3,7 +3,6 @@ package translator
 import (
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/xvimnt/OLC2_PROYECTO2_G15/ast"
@@ -71,6 +70,7 @@ type Translator struct {
 	DebugMode          bool
 	needsStringHelpers bool // Tracks if string concatenation helpers are needed
 	needsStrcmp        bool // Tracks if strcmp is needed
+	needsPrintIntSlice bool // Tracks if the print_int_slice helper is needed
 
 	// Register allocation
 	intRegs   []bool // Availability of general-purpose integer registers (X9-X15)
@@ -109,12 +109,12 @@ func NewTranslator(debugMode bool) *Translator {
 		falseStrLabel:      "",
 		emptyStrLabel:      "",
 
-		currentFuncDef:     nil,
-		funcSyms:           make(map[string]*ast.FunctionDecl),
-		DebugMode:          debugMode,
-		needsStrcmp:        false,
-		intRegs:            make([]bool, numIntRegs),
-		floatRegs:          make([]bool, numFloatRegs),
+		currentFuncDef: nil,
+		funcSyms:       make(map[string]*ast.FunctionDecl),
+		DebugMode:      debugMode,
+		needsStrcmp:    false,
+		intRegs:        make([]bool, numIntRegs),
+		floatRegs:      make([]bool, numFloatRegs),
 	}
 
 	// Initialize all registers as available
@@ -267,9 +267,82 @@ func (t *Translator) GetAssembly() []string {
 		}
 		finalAsm = append(finalAsm, ".text")
 		finalAsm = append(finalAsm, t.asm...)
+
+		if t.needsPrintIntSlice {
+			finalAsm = append(finalAsm, t.getPrintIntSliceAsm()...)
+		}
 	}
 
 	return finalAsm
+}
+
+func (t *Translator) ensurePrintIntSliceHelper() {
+	if t.needsPrintIntSlice {
+		return
+	}
+	t.needsPrintIntSlice = true
+	t.addData("open_bracket_str: .asciz \"[\"")
+	t.addData("close_bracket_str: .asciz \"]\"")
+	t.addData("comma_space_str: .asciz \", \"")
+	t.addData("slice_int_format_str: .asciz \"%d\"")
+}
+
+func (t *Translator) getPrintIntSliceAsm() []string {
+	return []string{
+		"",
+		"// --- Helper function to print a slice of integers ---",
+		"print_int_slice:",
+		"    STP X29, X30, [SP, #-48]!",
+		"    STP X19, X20, [SP, #16]",
+		"    STP X21, X22, [SP, #32]",
+		"    MOV X29, SP",
+		"    MOV X19, X0                       // Save slice descriptor address in X19",
+		"",
+		"    // Print opening bracket",
+		"    LDR X0, =open_bracket_str",
+		"    BL printf",
+		"",
+		"    // Load slice details",
+		"    LDR X20, [X19, #0]                // X20 = pointer to slice data",
+		"    LDR X21, [X19, #8]                // X21 = length of slice",
+		"",
+		"    // Loop setup",
+		"    MOV X22, #0                       // X22 = loop counter (i)",
+		"    B .Lprint_slice_loop_test",
+		"",
+		".Lprint_slice_loop_start:",
+		"    // Print comma and space if not the first element",
+		"    CMP X22, #0",
+		"    BEQ .Lprint_slice_skip_comma",
+		"    LDR X0, =comma_space_str",
+		"    BL printf",
+		"",
+		".Lprint_slice_skip_comma:",
+		"    // Load element: value = data[i]",
+		"    LSL X1, X22, #3                   // Offset = i * 8 (since elements are .quad, 8 bytes)",
+		"    LDR X1, [X20, X1]                 // Load element from data + offset into X1 (arg for printf)",
+		"",
+		"    // Print element",
+		"    LDR X0, =slice_int_format_str",
+		"    BL printf",
+		"",
+		"    // Increment and loop",
+		"    ADD X22, X22, #1",
+		"",
+		".Lprint_slice_loop_test:",
+		"    CMP X22, X21",
+		"    B.LT .Lprint_slice_loop_start",
+		"",
+		"    // Print closing bracket",
+		"    LDR X0, =close_bracket_str",
+		"    BL printf",
+		"",
+		"    // Restore registers and return",
+		"    LDP X21, X22, [SP, #32]",
+		"    LDP X19, X20, [SP, #16]",
+		"    LDP X29, X30, [SP], #48",
+		"    RET",
+	}
 }
 
 func (t *Translator) addAsm(instr string, args ...interface{}) {
@@ -956,7 +1029,7 @@ func (t *Translator) VisitIfStmt(node *ast.IfStmt) interface{} {
 	// The result of a boolean expression should be in a register (0 for false, 1 for true).
 	t.addAsm("    // If statement condition check")
 	t.addAsm("    CMP W%d, #0", conditionResult.Reg) // Compare the result with 0
-	t.releaseIntRegister(conditionResult.Reg)      // Free up the register
+	t.releaseIntRegister(conditionResult.Reg)        // Free up the register
 
 	if node.Alternative != nil {
 		t.addAsm("    B.EQ %s", elseLabel) // If condition is false (result == 0), jump to the 'else' part
@@ -1131,7 +1204,7 @@ func (t *Translator) VisitForStmt(node *ast.ForStmt) interface{} {
 		condResult := node.Condition.Accept(t).(ExpressionResult)
 		t.addAsm("    // For loop condition check")
 		t.addAsm("    CMP W%d, #0", condResult.Reg) // Check if the condition is false
-		t.addAsm("    B.EQ %s", loopEndLabel)      // If false, exit loop
+		t.addAsm("    B.EQ %s", loopEndLabel)       // If false, exit loop
 		t.releaseIntRegister(condResult.Reg)
 	} else {
 		// Infinite loop `for {}` - no condition, so we jump straight to the body
@@ -1342,12 +1415,12 @@ func (t *Translator) concatenateStrings(left, right ExpressionResult) Expression
 	t.addAsm("    MOV X%d, X0", resultReg) // Save new buffer pointer in resultReg
 
 	// 4. strcpy(new_buffer, left_string)
-	t.addAsm("    LDR X1, [SP, #0]")      // 2nd arg: src (left_string pointer)
+	t.addAsm("    LDR X1, [SP, #0]")       // 2nd arg: src (left_string pointer)
 	t.addAsm("    MOV X0, X%d", resultReg) // 1st arg: dest (new_buffer pointer)
 	t.addAsm("    BL strcpy")
 
 	// 5. strcat(new_buffer, right_string)
-	t.addAsm("    LDR X1, [SP, #8]")      // 2nd arg: src (right_string pointer)
+	t.addAsm("    LDR X1, [SP, #8]")       // 2nd arg: src (right_string pointer)
 	t.addAsm("    MOV X0, X%d", resultReg) // 1st arg: dest (new_buffer pointer)
 	t.addAsm("    BL strcat")
 
@@ -1890,8 +1963,8 @@ func (t *Translator) handleTypeOf(args []ast.Expression) interface{} {
 		t.releaseIntRegister(result.Reg)
 	case TypeFloat:
 		t.releaseFloatRegister(result.Reg)
-	// Note: Slices and other complex types might need special handling for register release.
-	// For now, we assume simple types or types whose registers can be released.
+		// Note: Slices and other complex types might need special handling for register release.
+		// For now, we assume simple types or types whose registers can be released.
 	}
 
 	// Get the string representation of the type, e.g., "int", "float64".
@@ -1981,117 +2054,58 @@ func (t *Translator) handleAtoi(args []ast.Expression) interface{} {
 }
 
 func (t *Translator) handlePrintln(args []ast.Expression) interface{} {
-	var formatString strings.Builder
-	var evaluatedArgs []ExpressionResult
+	t.needsPrintf = true
+	// Label for the space character, created only if needed.
+	var spaceLabel string
 
-	// Regex to find interpolated variables like $var
-	re := regexp.MustCompile(`\$([a-zA-Z_][a-zA-Z0-9_]*)`)
-
-	// 1. Evaluate all expressions first and build the format string.
 	for i, arg := range args {
+		// Print a space before all but the first argument.
 		if i > 0 {
-			formatString.WriteString(" ")
+			if spaceLabel == "" {
+				spaceLabel = t.addStringData(" ")
+			}
+			t.addAsm("    LDR X0, =%s", spaceLabel)
+			t.addAsm("    BL printf")
 		}
 
-		if strLit, ok := arg.(*ast.StringLiteral); ok {
-			content := strings.Trim(strLit.Value, "\"")
-			// Escape '%' characters in the literal parts of the string to prevent printf errors
-			content = strings.ReplaceAll(content, "%", "%%")
+		result := arg.Accept(t).(ExpressionResult)
 
-			matches := re.FindAllStringSubmatchIndex(content, -1)
-			lastIndex := 0
-
-			for _, match := range matches {
-				// Add the literal part before the variable
-				formatString.WriteString(content[lastIndex:match[0]])
-
-				// Get variable name
-				varName := content[match[2]:match[3]]
-
-				// Look up symbol
-				mangledName, varType, exists := t.lookupSymbol(varName)
-				if !exists {
-					panic(fmt.Sprintf("Undefined variable in string interpolation: %s", varName))
-				}
-
-				// Load the variable's value
-				var result ExpressionResult
-				addrReg := t.acquireIntRegister()
-				t.addAsm("    LDR X%d, =%s", addrReg, mangledName)
-
-				switch varType {
-				case TypeInt:
-					reg := t.acquireIntRegister()
-					t.addAsm("    LDRSW X%d, [X%d]", reg, addrReg)
-					result = ExpressionResult{Reg: reg, Type: TypeInt}
-					formatString.WriteString("%d")
-				case TypeFloat:
-					reg := t.acquireFloatRegister()
-					t.addAsm("    LDR D%d, [X%d]", reg, addrReg)
-					result = ExpressionResult{Reg: reg, Type: TypeFloat}
-					formatString.WriteString("%f")
-				case TypeString:
-					reg := t.acquireIntRegister()
-					t.addAsm("    LDR X%d, [X%d]", reg, addrReg)
-					result = ExpressionResult{Reg: reg, Type: TypeString}
-					formatString.WriteString("%s")
-				case TypeBool:
-					reg := t.acquireIntRegister()
-					t.addAsm("    LDRB W%d, [X%d]", reg, addrReg) // Load byte for bool
-					result = ExpressionResult{Reg: reg, Type: TypeBool}
-					formatString.WriteString("%s") // Will be handled later by the bool-to-string logic
-				default:
-					t.releaseIntRegister(addrReg) // Release before panic
-					panic(fmt.Sprintf("Unsupported type for interpolation: %s", varType))
-				}
-				t.releaseIntRegister(addrReg)
-				evaluatedArgs = append(evaluatedArgs, result)
-
-				lastIndex = match[1]
-			}
-			// Add the rest of the string after the last variable
-			formatString.WriteString(content[lastIndex:])
+		if result.Type == TypeSlice {
+			// This assumes the slice is of integers for now.
+			t.ensurePrintIntSliceHelper()
+			t.addAsm("    MOV X0, X%d", result.Reg) // Pass slice descriptor address to our helper
+			t.addAsm("    BL print_int_slice")
+			t.releaseIntRegister(result.Reg)
 		} else {
-			// This is the old logic for non-string-literal arguments
-			result := arg.Accept(t).(ExpressionResult)
-			evaluatedArgs = append(evaluatedArgs, result)
-
-				switch result.Type {
-				case TypeInt:
-					formatString.WriteString("%d")
-				case TypeBool:
-					formatString.WriteString("%s")
-				case TypeFloat:
-					formatString.WriteString("%f")
-				case TypeString:
-					formatString.WriteString("%s")
-				default:
-					panic(fmt.Sprintf("Unsupported type for println: %s", result.Type))
-				}
-		}
-	}
-	formatString.WriteString("\n")
-
-	// 2. Add the format string to the data section.
-	formatLabel := t.addStringData(formatString.String())
-
-	// 3. Load format string address into X0.
-	t.addAsm("    LDR X0, =%s", formatLabel)
-
-	// 4. Load arguments into registers X1-X7 and D0-D7.
-	intArgCount := 1 // Start from X1
-	floatArgCount := 0
-	for _, arg := range evaluatedArgs {
-		switch arg.Type {
-		case TypeInt, TypeString:
-			if intArgCount < 8 {
-				t.addAsm("    MOV X%d, X%d", intArgCount, arg.Reg)
-				intArgCount++
+			// It's a regular type, print it with printf
+			var format string
+			switch result.Type {
+			case TypeInt:
+				format = "%d"
+			case TypeString:
+				format = "%s"
+			case TypeFloat:
+				format = "%f"
+			case TypeBool:
+				format = "%s" // Bool is handled by passing "true" or "false" string address
+			default:
+				panic(fmt.Sprintf("Unsupported type for println: %s", result.Type))
 			}
-			t.releaseIntRegister(arg.Reg)
-		case TypeBool:
-			if intArgCount < 8 {
-				// Ensure "true" and "false" strings are in the data section
+
+			formatLabel := t.addStringData(format)
+			t.addAsm("    LDR X0, =%s", formatLabel)
+
+			switch result.Type {
+			case TypeInt, TypeString:
+				t.addAsm("    MOV X1, X%d", result.Reg)
+				t.releaseIntRegister(result.Reg)
+			case TypeFloat:
+				t.addAsm("    FMOV D0, D%d", result.Reg)
+				t.releaseFloatRegister(result.Reg)
+			case TypeBool:
+				trueLabelReg := t.acquireIntRegister()
+				falseLabelReg := t.acquireIntRegister()
+
 				if t.trueStrLabel == "" {
 					t.trueStrLabel = t.addStringData("true")
 				}
@@ -2099,38 +2113,24 @@ func (t *Translator) handlePrintln(args []ast.Expression) interface{} {
 					t.falseStrLabel = t.addStringData("false")
 				}
 
-				argReg := intArgCount
-				trueLabelReg := t.acquireIntRegister()
-				falseLabelReg := t.acquireIntRegister()
-
-				// Load addresses of "true" and "false" strings into temporary registers
 				t.addAsm("    LDR X%d, =%s", trueLabelReg, t.trueStrLabel)
 				t.addAsm("    LDR X%d, =%s", falseLabelReg, t.falseStrLabel)
 
-				// Compare the boolean value (0 or 1) with 0
-				t.addAsm("    CMP X%d, #0", arg.Reg)
-
-				// Conditionally select the correct address into the argument register
-				// If NE (not equal to 0, so it's 1/true), use trueLabelReg. Else use falseLabelReg.
-				t.addAsm("    CSEL X%d, X%d, X%d, NE", argReg, trueLabelReg, falseLabelReg)
+				t.addAsm("    CMP X%d, #0", result.Reg) // Compare the bool value (0 or 1)
+				// Select correct string address into X1. If NE (not equal to 0, i.e., true), use true label.
+				t.addAsm("    CSEL X1, X%d, X%d, NE", trueLabelReg, falseLabelReg)
 
 				t.releaseIntRegister(trueLabelReg)
 				t.releaseIntRegister(falseLabelReg)
-				t.releaseIntRegister(arg.Reg)
-				intArgCount++
-			} else {
-				t.releaseIntRegister(arg.Reg) // Release if we can't pass it
+				t.releaseIntRegister(result.Reg)
 			}
-		case TypeFloat:
-			if floatArgCount < 8 {
-				t.addAsm("    FMOV D%d, D%d", floatArgCount, arg.Reg)
-				floatArgCount++
-			}
-			t.releaseFloatRegister(arg.Reg)
+			t.addAsm("    BL printf")
 		}
 	}
 
-	// 5. Call printf.
+	// Finally, print a newline character.
+	newlineLabel := t.addStringData("\n")
+	t.addAsm("    LDR X0, =%s", newlineLabel)
 	t.addAsm("    BL printf")
 
 	return nil
@@ -2319,21 +2319,19 @@ func (t *Translator) VisitOptionalTypeNode(node *ast.OptionalTypeNode) interface
 
 func (t *Translator) VisitAnonymousStructTypeNode(node *ast.AnonymousStructTypeNode) interface{} {
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting AnonymousStructTypeNode")
+		fmt.Printf("Visiting AnonymousStructTypeNode: %v\n", node)
 	}
-	// TODO: Implement proper handling for anonymous struct types
-	// For now, treat it as an unknown/unsupported type for translation
-	for _, field := range node.Fields {
-		field.Accept(t)
-	}
+	// For now, we don't generate specific code for anonymous struct type definitions themselves,
+	// as they are mainly for type checking and structure definition.
+	// The actual instantiation is handled by CompositeLiteralExpr.
 	return nil
 }
 
 func (t *Translator) VisitAnonymousInterfaceTypeNode(node *ast.AnonymousInterfaceTypeNode) interface{} {
 	if t.DebugMode {
-		fmt.Println("Translator.Visiting AnonymousInterfaceTypeNode")
+		fmt.Printf("Visiting AnonymousInterfaceTypeNode: %v\n", node)
 	}
-	// TODO: Implement proper handling for anonymous interface types
+	// Placeholder implementation
 	return nil
 }
 

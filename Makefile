@@ -1,6 +1,6 @@
 # V Language Interpreter Makefile
 
-.PHONY: all build clean test generate run run-arm coverage help build-arm test-v-flow
+.PHONY: all build clean test generate run run-arm coverage help build-arm test-v-flow install-qemu check-qemu
 
 # Go parameters
 GOCMD=go
@@ -18,7 +18,7 @@ ANTLR_JAR=antlr-4.12.0-complete.jar
 ANTLR_URL=https://www.antlr.org/download/antlr-4.12.0-complete.jar
 
 # ARM Cross-compilation parameters
-ARM_GCC=aarch64-none-linux-gnu-gcc
+ARM_GCC=aarch64-linux-gnu-gcc
 ARM_FLAGS=-static
 ARM_OUTPUT=output.exe
 ARM_SOURCE=output.s
@@ -34,22 +34,55 @@ build:
 # Build the ARM executable from assembly
 build-arm:
 	@echo "Building ARM executable from $(ARM_SOURCE)..."
-	$(ARM_GCC) $(ARM_FLAGS) -o $(ARM_OUTPUT) $(ARM_SOURCE)
+	wsl -d Ubuntu $(ARM_GCC) $(ARM_FLAGS) -o $(ARM_OUTPUT) $(ARM_SOURCE)
  
-# Run the ARM executable using QEMU
+# Install QEMU automatically using PowerShell script
+install-qemu:
+	@echo "=== Installing QEMU in WSL Ubuntu ==="
+	@powershell -ExecutionPolicy Bypass -File install_qemu.ps1
+
+# Check if QEMU is installed
+check-qemu:
+	@echo "Checking QEMU installation..."
+	@powershell -Command " \
+		try { \
+			$$result = wsl -d Ubuntu bash -c 'command -v qemu-aarch64-static'; \
+			if ($$result) { \
+				Write-Host 'QEMU está instalado correctamente' -ForegroundColor Green; \
+				wsl -d Ubuntu qemu-aarch64-static --version | Select-Object -First 1; \
+			} else { \
+				Write-Host 'QEMU no está instalado. Ejecuta: make install-qemu' -ForegroundColor Red; \
+				exit 1; \
+			} \
+		} catch { \
+			Write-Host 'Error verificando QEMU o WSL no disponible' -ForegroundColor Red; \
+			exit 1; \
+		}"
+
+# Run the ARM executable using QEMU (with fallback)
 run-arm:
 	@echo "Running ARM executable with QEMU..."
-	@powershell -Command "$$wsl_path = ((Get-Location).Path.Replace('C:\', '/mnt/c/').Replace('\', '/') + '/$(ARM_OUTPUT)'); wsl /usr/bin/qemu-aarch64-static $$wsl_path > wsl_output.txt 2>&1; Write-Host '--- QEMU Output ---'; type wsl_output.txt; Write-Host '--- End QEMU Output ---'; del wsl_output.txt"
+	@powershell -Command " \
+		$$wsl_path = ((Get-Location).Path.Replace('C:\', '/mnt/c/').Replace('D:\', '/mnt/d/').Replace('\', '/') + '/$(ARM_OUTPUT)'); \
+		try { \
+			wsl -d Ubuntu bash -c \"if command -v qemu-aarch64-static &> /dev/null; then /usr/bin/qemu-aarch64-static $$wsl_path; else echo 'ERROR: QEMU not found. Run: make install-qemu'; exit 1; fi\" \
+		} catch { \
+			Write-Host 'ERROR: WSL Ubuntu not available or QEMU not installed.'; \
+			Write-Host 'Please run: make install-qemu'; \
+			exit 1 \
+		}"
 
 # Run the full build, translate, build-arm, and run-arm flow for test.v
 test-v-flow:
-	@echo "--- [1/4] Building the compiler ---"
+	@echo "--- [0/5] Checking QEMU installation ---"
+	$(MAKE) check-qemu
+	@echo "--- [1/5] Building the compiler ---"
 	$(MAKE) build
-	@echo "--- [2/4] Translating test.v to ARM assembly ---"
+	@echo "--- [2/5] Translating test.v to ARM assembly ---"
 	powershell -Command "$$env:VLANG_DEBUG='true'; .\$(BINARY_NAME) translate test.v"
-	@echo "--- [3/4] Building the ARM executable ---"
+	@echo "--- [3/5] Building the ARM executable ---"
 	$(MAKE) build-arm
-	@echo "--- [4/4] Running the ARM executable with QEMU ---"
+	@echo "--- [4/5] Running the ARM executable with QEMU ---"
 	$(MAKE) run-arm
 
 # Clean build artifacts
@@ -120,8 +153,10 @@ help:
 	@echo "  generate   - Generate parser from grammar"
 	@echo "  deps       - Update Go dependencies"
 	@echo "  run        - Run the application"
+	@echo "  install-qemu - Install QEMU in WSL Ubuntu for ARM emulation"
+	@echo "  check-qemu - Check if QEMU is installed and working"
 	@echo "  run-arm    - Run the ARM executable using QEMU"
-	@echo "  test-v-flow - Run the full flow for test.v (build, translate, build-arm, run-arm)"
+	@echo "  test-v-flow - Run the full flow for test.v (install-qemu, build, translate, build-arm, run-arm)"
 	@echo "  example    - Run a specific example: make example basic (runs examples/basic.mylang)"
 	@echo "  repl       - Start the REPL"
 	@echo "  help       - Display this help information"

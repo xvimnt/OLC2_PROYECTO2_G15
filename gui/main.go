@@ -297,7 +297,7 @@ func main() {
 	myApp := app.NewWithID("com.vlangcherry.ide")
 	myApp.Settings().SetTheme(&myTheme{})
 	myWindow := myApp.NewWindow("VLang Cherry IDE")
-	
+
 	// Configurar directorio de trabajo para evitar errores de URI
 	if wd, err := os.Getwd(); err == nil {
 		os.Chdir(wd)
@@ -367,7 +367,7 @@ func main() {
 		tmpFile.Close()
 
 		// Traducir a ARM64 Assembly
-		cmd := exec.Command(".\\OLC2_PROYECTO2_G15.exe", "translate", tmpFile.Name())
+		cmd := exec.Command("./OLC2_PROYECTO2_G15", "translate", tmpFile.Name())
 		cmd.Dir = ".." // Cambiar al directorio padre donde está el ejecutable
 		output, err := cmd.CombinedOutput()
 		if err != nil {
@@ -392,7 +392,7 @@ func main() {
 			consola.SetText("Error ejecutando con QEMU:\n" + string(output))
 			return
 		}
-		
+
 		// Filtrar el mensaje de QEMU y solo mostrar la salida del programa
 		outputStr := string(output)
 		if strings.Contains(outputStr, "Running ARM executable with QEMU...") {
@@ -415,10 +415,10 @@ func main() {
 			}
 			outputStr = strings.Join(filteredLines, "\n")
 		}
-		
+
 		consola.SetText(outputStr)
 	}
-	
+
 	btnTraducir.OnTapped = func() {
 		// Crear archivo temporal con el código
 		tmpFile, err := ioutil.TempFile("", "*.v")
@@ -431,27 +431,27 @@ func main() {
 		tmpFile.Close()
 
 		// Traducir a ARM64 Assembly
-		cmd := exec.Command(".\\OLC2_PROYECTO2_G15.exe", "translate", tmpFile.Name())
+		cmd := exec.Command("./OLC2_PROYECTO2_G15", "translate", tmpFile.Name())
 		cmd.Dir = ".." // Cambiar al directorio padre donde está el ejecutable
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			consola.SetText("Error en traducción:\n" + string(output) + "\nError: " + err.Error())
 			return
 		}
-		
+
 		// Filtrar las líneas de debug y solo mostrar el código Assembly
 		outputStr := string(output)
-		
+
 		// Si no hay contenido de assembly, mostrar toda la salida para debug
 		if !strings.Contains(outputStr, "--- Generated assembly code ---") {
 			consola.SetText("Salida completa para debug:\n" + outputStr)
 			return
 		}
-		
+
 		lines := strings.Split(outputStr, "\n")
 		var assemblyLines []string
 		inAssembly := false
-		
+
 		for _, line := range lines {
 			// Iniciar captura después de "--- Generated assembly code ---"
 			if strings.Contains(line, "--- Generated assembly code ---") {
@@ -468,11 +468,11 @@ func main() {
 				assemblyLines = append(assemblyLines, line)
 			}
 		}
-		
+
 		// Mostrar solo el código Assembly
 		consola.SetText(strings.Join(assemblyLines, "\n"))
 	}
-	
+
 	btnErrores.OnTapped = func() {
 		tmpFile, err := ioutil.TempFile("", "*.v")
 		if err != nil {

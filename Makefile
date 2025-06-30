@@ -84,6 +84,11 @@ generate:
 	@echo "Generating parser from grammar..."
 	@mkdir -p $(PARSER_DIR)
 	java -Xmx500M -cp $(ANTLR_JAR) org.antlr.v4.Tool -Dlanguage=Go -visitor -o $(PARSER_DIR) $(GRAMMAR_DIR)/VLangCherry.g4
+	@echo "Moving generated files to parser directory..."
+	@if [ -d $(PARSER_DIR)/grammar ]; then \
+		mv $(PARSER_DIR)/grammar/* $(PARSER_DIR)/ && \
+		rmdir $(PARSER_DIR)/grammar; \
+	fi
 
 # Fix imports in generated files
 fix-imports:
@@ -103,7 +108,7 @@ run:
 # Run a specific example
 example:
 	@echo "Running example: $(filter-out $@,$(MAKECMDGOALS))"
-	./$(BINARY_NAME) run ./examples/$(filter-out $@,$(MAKECMDGOALS)).mylang
+	./$(BINARY_NAME) run ./examples/$(filter-out $@,$(MAKECMDGOALS)).v
 
 # Run the REPL
 repl:
@@ -124,7 +129,7 @@ help:
 	@echo "  run         - Run the application"
 	@echo "  run-arm     - Run the ARM executable using QEMU"
 	@echo "  test-v-flow - Run the full flow for test.v (build, translate, build-arm, run-arm)"
-	@echo "  example     - Run a specific example: make example basic (runs examples/basic.mylang)"
+	@echo "  example     - Run a specific example: make example basic (runs examples/basic.v)"
 	@echo "  repl        - Start the REPL"
 	@echo "  help        - Display this help information"
 

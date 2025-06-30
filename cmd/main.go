@@ -318,6 +318,13 @@ func translateFile(filePath string, debugMode bool) {
 	// The Accept method on Program node will kick off the visitation
 	program.Accept(trans)
 
+	// Check for symbol table request first
+	if os.Getenv("VLANG_SYMBOLS") == "1" {
+		fmt.Println("=== Tabla de Símbolos ===")
+		fmt.Print(trans.GetSymbolTableReport())
+		return
+	}
+
 	// Get the generated assembly
 	assembly := trans.GetAssembly()
 

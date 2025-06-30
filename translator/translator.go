@@ -79,6 +79,9 @@ type Translator struct {
 	// Loop context
 	breakLabels    []string // Stack of labels for 'break' statements
 	continueLabels []string // Stack of labels for 'continue' statements
+
+	// Symbol table reporting
+	symbolReports []string // Simple list of symbols for reporting
 }
 
 const (
@@ -115,6 +118,7 @@ func NewTranslator(debugMode bool) *Translator {
 		needsStrcmp:    false,
 		intRegs:        make([]bool, numIntRegs),
 		floatRegs:      make([]bool, numFloatRegs),
+		symbolReports:  make([]string, 0),
 	}
 
 	// Initialize all registers as available
@@ -414,6 +418,20 @@ func (t *Translator) VisitFunctionDecl(node *ast.FunctionDecl) interface{} {
 	}
 	t.currentFuncDef = node
 
+	// Add function to symbol report
+	if node.Name != nil {
+		line, column := 0, 0
+		if node.Name != nil {
+			line = node.Name.Line
+			column = node.Name.Column
+		}
+		returnType := "void"
+		if node.ReturnType != nil {
+			returnType = node.ReturnType.String()
+		}
+		t.addSymbolReport(node.Name.Name, "Function", returnType, "Global", line, column)
+	}
+
 	if node.Name != nil && node.Name.Name == "main" {
 		t.addAsm(".global main")
 		t.addAsm("main:")
@@ -544,6 +562,14 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 
 		mangledName := t.defineSymbol(node.Name.Name, varType)
 
+		// Add symbol to report
+		line, column := 0, 0
+		if node.Name != nil {
+			line = node.Name.Line
+			column = node.Name.Column
+		}
+		t.addSymbolReport(node.Name.Name, "Variable", varType.String(), t.getCurrentScope(), line, column)
+
 		// Add variable to .data section, initializing to its zero-value.
 		t.addAsm("    // Declaring %s without initializer", node.Name.Name)
 		switch varType {
@@ -574,6 +600,14 @@ func (t *Translator) VisitVarDecl(node *ast.VarDecl) interface{} {
 
 	// Define the symbol with the type from the expression result
 	mangledName := t.defineSymbol(node.Name.Name, res.Type)
+
+	// Add symbol to report
+	line, column := 0, 0
+	if node.Name != nil {
+		line = node.Name.Line
+		column = node.Name.Column
+	}
+	t.addSymbolReport(node.Name.Name, "Variable", res.Type.String(), t.getCurrentScope(), line, column)
 
 	// Add variable to .data section, initializing to zero/null.
 	switch res.Type {
@@ -1837,7 +1871,6 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 		return t.handleTypeOf(node.Arguments)
 	}
 
-	// ... (rest of the code remains the same)
 	// --- General Function Call for user-defined functions ---
 	funcDef, exists := t.funcSyms[funcName]
 	if !exists {
@@ -1907,16 +1940,15 @@ func (t *Translator) VisitCallExpr(node *ast.CallExpr) interface{} {
 	return nil // No value for void functions
 }
 
-// typeNodeToVarType converts an ast.TypeNode to a VarType.
+// typeNodeToVarType converts ast.TypeNode to VarType
 func (t *Translator) typeNodeToVarType(typeNode ast.TypeNode) VarType {
 	if typeNode == nil {
-		// This typically means a void return type for a function.
 		return TypeVoid
 	}
 
-	switch n := typeNode.(type) {
+	switch node := typeNode.(type) {
 	case *ast.PrimitiveTypeNode:
-		switch n.Kind {
+		switch node.Kind {
 		case ast.IntKind:
 			return TypeInt
 		case ast.Float64Kind:
@@ -1926,26 +1958,17 @@ func (t *Translator) typeNodeToVarType(typeNode ast.TypeNode) VarType {
 		case ast.BoolKind:
 			return TypeBool
 		default:
-			panic(fmt.Sprintf("Unsupported primitive type kind: %v", n.Kind))
+			return TypeUnknown
 		}
-	// TODO: Add cases for other types like Array, Struct, etc. as they are implemented.
+	case *ast.SliceTypeNode:
+		return TypeSlice
 	case *ast.TypeName:
-		switch n.Name {
-		case "int":
-			return TypeInt
-		case "f64":
-			return TypeFloat
-		case "string":
-			return TypeString
-		case "bool":
-			return TypeBool
-		case "void":
+		if node.Name == "void" {
 			return TypeVoid
-		default:
-			panic(fmt.Sprintf("Unsupported type name: %s", n.Name))
 		}
+		return TypeStruct
 	default:
-		panic(fmt.Sprintf("Unsupported type node: %T", n))
+		return TypeUnknown
 	}
 }
 
@@ -2357,4 +2380,35 @@ func (t *Translator) VisitPrimitiveTypeNode(node *ast.PrimitiveTypeNode) interfa
 	}
 	// TODO: Implement PrimitiveTypeNode translation
 	return nil
+}
+
+// GetSymbolTableReport returns the symbol table as a string
+func (t *Translator) GetSymbolTableReport() string {
+	if len(t.symbolReports) == 0 {
+		return "ID\tTipo Símbolo\tTipo Dato\tÁmbito\tLínea\tColumna\tNombre\n"
+	}
+
+	result := "ID\tTipo Símbolo\tTipo Dato\tÁmbito\tLínea\tColumna\tNombre\n"
+	for _, symbol := range t.symbolReports {
+		result += symbol + "\n"
+	}
+	return result
+}
+
+// addSymbolReport adds a symbol to the report
+func (t *Translator) addSymbolReport(name, symbolType, dataType, scope string, line, column int) {
+	id := len(t.symbolReports) + 1
+	symbol := fmt.Sprintf("%d\t%s\t%s\t%s\t%d\t%d\t%s", id, symbolType, dataType, scope, line, column, name)
+	t.symbolReports = append(t.symbolReports, symbol)
+}
+
+// getCurrentScope returns the current scope name
+func (t *Translator) getCurrentScope() string {
+	if len(t.scopeIDStack) <= 1 {
+		return "Global"
+	}
+	if t.currentFuncDef != nil && t.currentFuncDef.Name != nil {
+		return t.currentFuncDef.Name.Name
+	}
+	return fmt.Sprintf("Scope_%d", len(t.scopeIDStack))
 }

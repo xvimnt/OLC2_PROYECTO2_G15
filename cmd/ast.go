@@ -253,7 +253,11 @@ func (v *AstBuilder) VisitStructDeclaration(ctx *parser.StructDeclarationContext
 		fmt.Printf("AstBuilder.Visiting StructDeclarationContext: %s\n", ctx.GetText())
 	}
 
-	name := &ast.IdentifierExpr{Name: ctx.IDENTIFIER().GetText()}
+	name := &ast.IdentifierExpr{
+		Name:   ctx.IDENTIFIER().GetText(),
+		Line:   ctx.GetStart().GetLine(),
+		Column: ctx.GetStart().GetColumn(),
+	}
 
 	var fields []*ast.FieldDecl
 	for _, fieldCtx := range ctx.AllFieldDeclaration() {
@@ -280,7 +284,11 @@ func (v *AstBuilder) VisitReceiver(ctx *parser.ReceiverContext) interface{} {
 		fmt.Fprintf(os.Stderr, "Error: missing receiver name in function declaration. Found '%s'.\n", ctx.GetText())
 		return nil
 	}
-	receiverName := &ast.IdentifierExpr{Name: ctx.IDENTIFIER().GetText()}
+	receiverName := &ast.IdentifierExpr{
+		Name:   ctx.IDENTIFIER().GetText(),
+		Line:   ctx.GetStart().GetLine(),
+		Column: ctx.GetStart().GetColumn(),
+	}
 
 	if ctx.Type_() == nil {
 		fmt.Fprintf(os.Stderr, "Error: missing type for receiver '%s' in function declaration.\n", receiverName.Name)
@@ -312,7 +320,11 @@ func (v *AstBuilder) VisitFieldDeclaration(ctx *parser.FieldDeclarationContext) 
 		fmt.Fprintf(os.Stderr, "Error: missing field name in struct declaration. Found '%s'.\n", ctx.GetText())
 		return nil
 	}
-	fieldName := &ast.IdentifierExpr{Name: ctx.IDENTIFIER().GetText()}
+	fieldName := &ast.IdentifierExpr{
+		Name:   ctx.IDENTIFIER().GetText(),
+		Line:   ctx.GetStart().GetLine(),
+		Column: ctx.GetStart().GetColumn(),
+	}
 
 	if ctx.Type_() == nil {
 		fmt.Fprintf(os.Stderr, "Error: missing type for field '%s' in struct declaration.\n", fieldName.Name)
@@ -341,7 +353,11 @@ func (v *AstBuilder) VisitFunctionDeclaration(ctx *parser.FunctionDeclarationCon
 
 	var funcNameNode *ast.IdentifierExpr
 	if idNode := ctx.IDENTIFIER(); idNode != nil {
-		funcNameNode = &ast.IdentifierExpr{Name: idNode.GetText()}
+		funcNameNode = &ast.IdentifierExpr{
+			Name:   idNode.GetText(),
+			Line:   ctx.GetStart().GetLine(),
+			Column: ctx.GetStart().GetColumn(),
+		}
 	} else {
 		// This should ideally not happen if the grammar enforces a function name.
 
@@ -480,7 +496,11 @@ func (v *AstBuilder) VisitVarDecl(ctx *parser.VarDeclContext) interface{} {
 		fmt.Println("AstBuilder.Visiting VarDeclContext")
 	}
 
-	varNameNode := &ast.IdentifierExpr{Name: ctx.IDENTIFIER().GetText()}
+	varNameNode := &ast.IdentifierExpr{
+		Name:   ctx.IDENTIFIER().GetText(),
+		Line:   ctx.GetStart().GetLine(),
+		Column: ctx.GetStart().GetColumn(),
+	}
 	isMutable := ctx.MUT() != nil
 	isShortHand := ctx.COLON_EQ() != nil
 
@@ -570,7 +590,11 @@ func (v *AstBuilder) VisitParameterDecl(ctx *parser.ParameterDeclContext) interf
 	// Assuming ParameterDeclContext has IDENTIFIER() for name and Type_() for type context.
 	// These might need to be ctx.Name().GetText() or ctx.Id().GetText() etc. depending on grammar labels.
 	if idTerminalNode := ctx.IDENTIFIER(); idTerminalNode != nil {
-		paramNameNode = &ast.IdentifierExpr{Name: idTerminalNode.GetText()}
+		paramNameNode = &ast.IdentifierExpr{
+			Name:   idTerminalNode.GetText(),
+			Line:   ctx.GetStart().GetLine(),
+			Column: ctx.GetStart().GetColumn(),
+		}
 	} else {
 		fmt.Fprintf(os.Stderr, "Error: Parameter declaration is missing a name in context: %s\n", ctx.GetText())
 		return &ast.ParameterDecl{Name: &ast.IdentifierExpr{Name: "<ERROR_PARAM_NO_NAME>"}}

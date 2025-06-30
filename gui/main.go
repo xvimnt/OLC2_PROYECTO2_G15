@@ -507,7 +507,7 @@ func main() {
 		tmpFile.WriteString(editor.Text)
 		tmpFile.Close()
 
-		cmd := exec.Command("../OLC2_PROYECTO2_G15", "run", tmpFile.Name())
+		cmd := exec.Command("../OLC2_PROYECTO2_G15", "translate", tmpFile.Name())
 		cmd.Env = append(os.Environ(), "VLANG_SYMBOLS=1")
 		output, err := cmd.CombinedOutput()
 		if err != nil {
